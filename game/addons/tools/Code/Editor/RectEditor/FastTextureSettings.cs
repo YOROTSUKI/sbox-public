@@ -94,6 +94,7 @@ public class FastTextureSettings
 	[Hide] private Vector2 _savedRectMin = Vector2.Zero;
 	[Hide] private Vector2 _savedRectMax = Vector2.One;
 	[Hide] private int _gridSize = 16;
+	[Hide] private bool _editVertices;
 
 	public FastTextureSettings()
 	{
@@ -304,6 +305,17 @@ public class FastTextureSettings
 
 	[Hide]
 	public bool IsPickingEdge { get; set; }
+
+	[Hide]
+	public bool EditVertices
+	{
+		get => _editVertices;
+		set
+		{
+			_editVertices = value;
+			OnSettingsChanged?.Invoke();
+		}
+	}
 
 	[Category( "Alignment" ), Button( "Pick Edge", "border_vertical" )]
 	public void PickEdge()

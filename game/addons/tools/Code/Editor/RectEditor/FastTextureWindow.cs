@@ -452,6 +452,7 @@ public class RectViewToolbar : Widget
 				CreateModeButton( toggleRow, "swap_horiz", "Flip H", () => false, () => Settings.IsFlippedHorizontal = !Settings.IsFlippedHorizontal );
 				CreateModeButton( toggleRow, "swap_vert", "Flip V", () => false, () => Settings.IsFlippedVertical = !Settings.IsFlippedVertical );
 				CreateModeButton( toggleRow, "border_vertical", "Pick", () => Settings.IsPickingEdge, () => Settings.PickEdge() );
+				CreateModeButton( toggleRow, "control_point", "Edit Verts", () => Settings.EditVertices, () => Settings.EditVertices = !Settings.EditVertices );
 			} );
 		}
 
