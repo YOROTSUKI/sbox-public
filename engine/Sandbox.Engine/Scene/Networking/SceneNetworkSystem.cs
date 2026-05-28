@@ -693,6 +693,8 @@ public partial class SceneNetworkSystem : GameNetworkSystem
 
 	public override void OnJoined( Connection client )
 	{
+		Platform.Chat.BroadcastText( $"👋 {client.Name} has joined the game" );
+
 		Action queue = default;
 
 		foreach ( var c in Game.ActiveScene.GetAll<Component.INetworkListener>() )
@@ -728,6 +730,8 @@ public partial class SceneNetworkSystem : GameNetworkSystem
 
 			if ( Networking.IsHost )
 			{
+				Platform.Chat.BroadcastText( $"👋 {client.Name} left the game" );
+
 				Action queue = default;
 
 				foreach ( var c in Game.ActiveScene.GetAll<Component.INetworkListener>() )
@@ -1170,7 +1174,7 @@ public partial class SceneNetworkSystem : GameNetworkSystem
 
 		if ( !source.IsHost )
 		{
-			Log.Warning( $"OnObjectDetach: Only the host can detach networked objects. {source.DisplayName} attempted to detach {obj.Name}." );
+			Log.Warning( $"OnObjectDetach: Only the host can detach networked objects. {source.Name} attempted to detach {obj.Name}." );
 			return;
 		}
 
@@ -1202,7 +1206,7 @@ public partial class SceneNetworkSystem : GameNetworkSystem
 			// If we're unowned and the source is not the host, we can't destroy.
 			if ( !source.IsHost )
 			{
-				Log.Warning( $"ObjectDestroy: Only the host can destroy unowned networked objects. {source.DisplayName} attempted to destroy {obj.Name}." );
+				Log.Warning( $"ObjectDestroy: Only the host can destroy unowned networked objects. {source.Name} attempted to destroy {obj.Name}." );
 				return;
 			}
 		}
@@ -1211,14 +1215,14 @@ public partial class SceneNetworkSystem : GameNetworkSystem
 			// If the source is not the owner and not the host, we can't destroy.
 			if ( !source.IsHost && obj._net.Owner != source.Id )
 			{
-				Log.Warning( $"ObjectDestroy: {source.DisplayName} attempted to destroy {obj.Name} but is not the owner. Owner is {obj._net.Owner}." );
+				Log.Warning( $"ObjectDestroy: {source.Name} attempted to destroy {obj.Name} but is not the owner. Owner is {obj._net.Owner}." );
 				return;
 			}
 
 			// If the source is the owner but not the host, check if they have permission to destroy.
 			if ( !source.IsHost && !source.CanDestroyObjects )
 			{
-				Log.Warning( $"ObjectDestroy: {source.DisplayName} attempted to destroy {obj.Name} but does not have CanDestroyObjects permission enabled." );
+				Log.Warning( $"ObjectDestroy: {source.Name} attempted to destroy {obj.Name} but does not have CanDestroyObjects permission enabled." );
 				return;
 			}
 		}
