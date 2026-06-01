@@ -226,6 +226,9 @@ public partial class SoundHandle : IValid, IDisposable
 	[Obsolete( "Use Time instead" )]
 	public float ElapsedTime => Time;
 
+	int _pendingSeekSample = -1;
+	int _lastSamplePosition;
+
 	/// <summary>
 	/// The current time of the playing sound in seconds.
 	/// Note: for some formats seeking may be expensive, and some may not support it at all.
@@ -237,13 +240,30 @@ public partial class SoundHandle : IValid, IDisposable
 			if ( IsStopped ) return 0.0f;
 			if ( sampler is null ) return 0.0f;
 
-			return SampleRate > 0 ? sampler.SamplePosition / (float)SampleRate : 0.0f;
+			return SampleRate > 0 ? System.Threading.Volatile.Read( ref _lastSamplePosition ) / (float)SampleRate : 0.0f;
 		}
 		set
 		{
 			if ( sampler is null ) return;
 
-			sampler.SamplePosition = (int)(value * SampleRate);
+			int sample = (int)(value * SampleRate);
+			// Publish the seek intent first so a mix in-flight picks it up; reflect it immediately on the getter.
+			System.Threading.Interlocked.Exchange( ref _pendingSeekSample, sample );
+			System.Threading.Volatile.Write( ref _lastSamplePosition, sample );
+		}
+	}
+
+	/// <summary>Mix-thread: apply any pending seek, sample, then publish the position back to the main thread.</summary>
+	internal void SampleWithSeek( AudioSampler s, float pitch )
+	{
+		int pending = System.Threading.Interlocked.Exchange( ref _pendingSeekSample, -1 );
+		if ( pending >= 0 ) s.SamplePosition = pending;
+
+		s.Sample( pitch );
+
+		if ( System.Threading.Volatile.Read( ref _pendingSeekSample ) < 0 )
+		{
+			System.Threading.Volatile.Write( ref _lastSamplePosition, s.SamplePosition );
 		}
 	}
 

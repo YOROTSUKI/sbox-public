@@ -275,9 +275,9 @@ static class MixingThread
 
 		System.Threading.Tasks.Parallel.For( 0, snapshot.Voices.Count, i =>
 		{
-			var sampler = snapshot.Voices[i].Sampler;
-			if ( sampler is null ) return;
-			sampler.Sample( snapshot.Voices[i].Pitch );
+			var v = snapshot.Voices[i];
+			if ( v.Sampler is null ) return;
+			v.Handle.SampleWithSeek( v.Sampler, v.Pitch );
 		} );
 	}
 
