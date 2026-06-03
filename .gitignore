@@ -101,3 +101,11 @@ engine/TestResults/
 /game/tools
 /game/aftermath_dumps
 /game/gamecache
+
+
+#
+# asset debris
+#
+/game/addons/base/Assets/textures/shapes/bean1.vtex
+/game/**/*.vtex_c
+/game/**/_bakeresourcecache/

@@ -1,1 +1,7 @@
 !*_c
+
+*.vtex_c
+*.vmat_c
+*.vmdl_c
+*.vanmgrph_c
+/textures/generated/

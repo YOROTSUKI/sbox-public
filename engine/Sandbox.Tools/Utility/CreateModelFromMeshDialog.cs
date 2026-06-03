@@ -1,9 +1,10 @@
+using System;
 using System.IO;
 
 namespace Editor;
 
 /// <summary>
-/// A popup dialog for creating models from mesh files (.fbx, .obj, .dmx).
+/// A popup dialog for creating models from mesh files (.fbx, .obj, .dmx, .cast).
 /// Lets you configure collision type and output path.
 /// </summary>
 public class CreateModelFromMeshDialog : Widget
@@ -16,6 +17,7 @@ public class CreateModelFromMeshDialog : Widget
 	}
 
 	readonly List<Asset> _meshFiles;
+	readonly bool _containsCastFiles;
 	readonly ComboBox _collisionCombo;
 	readonly LineEdit _fileEdit;
 	readonly FolderEdit _folderEdit;
@@ -25,6 +27,7 @@ public class CreateModelFromMeshDialog : Widget
 	public CreateModelFromMeshDialog( List<Asset> meshFiles ) : base( null )
 	{
 		_meshFiles = meshFiles;
+		_containsCastFiles = meshFiles.Any( IsCastFile );
 
 		WindowFlags = WindowFlags.Dialog | WindowFlags.Customized | WindowFlags.WindowTitle | WindowFlags.CloseButton | WindowFlags.WindowSystemMenuHint;
 		DeleteOnClose = true;
@@ -56,7 +59,7 @@ public class CreateModelFromMeshDialog : Widget
 		_collisionCombo.AddItem( "Convex Hull", icon: "change_history" );
 		_collisionCombo.AddItem( "Exact Mesh", icon: "grid_on" );
 		_collisionCombo.AddItem( "None", icon: "block" );
-		_collisionCombo.CurrentIndex = 0;
+		_collisionCombo.CurrentIndex = _containsCastFiles ? 2 : 0;
 
 		var defaultDir = Path.GetDirectoryName( meshFiles[0].AbsolutePath );
 		var defaultFile = Path.ChangeExtension( meshFiles[0].AbsolutePath, ".vmdl" );
@@ -172,6 +175,12 @@ public class CreateModelFromMeshDialog : Widget
 
 	void CreateModel( Asset mesh, string outputPath )
 	{
+		if ( IsCastFile( mesh ) )
+		{
+			EditorUtility.CreateModelFromCastFile( mesh, outputPath, SelectedCollision );
+			return;
+		}
+
 		if ( !g_pToolFramework2.InitEngineTool( "modeldoc_editor" ) )
 			return;
 
@@ -194,5 +203,10 @@ public class CreateModelFromMeshDialog : Widget
 
 		var asset = AssetSystem.RegisterFile( outputPath );
 		asset?.Compile( true );
+	}
+
+	static bool IsCastFile( Asset mesh )
+	{
+		return string.Equals( Path.GetExtension( mesh.AbsolutePath ), ".cast", StringComparison.OrdinalIgnoreCase );
 	}
 }

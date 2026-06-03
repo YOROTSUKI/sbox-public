@@ -29,6 +29,7 @@
     <ProjectReference Include="../Sandbox.Event/Sandbox.Event.csproj" />
     <ProjectReference Include="../Sandbox.GameInstance/Sandbox.GameInstance.csproj" />
     <ProjectReference Include="../Sandbox.Reflection/Sandbox.Reflection.csproj" />
+    <ProjectReference Include="../ThirdParty/Cast.NET/Cast.NET.csproj" />
   </ItemGroup>
 
   <ItemGroup>

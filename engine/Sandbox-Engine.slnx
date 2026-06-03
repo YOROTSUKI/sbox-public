@@ -39,6 +39,7 @@
     <Project Path="Sandbox.Services/Sandbox.Services.csproj" />
     <Project Path="Sandbox.SolutionGenerator/Sandbox.SolutionGenerator.csproj" />
     <Project Path="Sandbox.System/Sandbox.System.csproj" />
+    <Project Path="ThirdParty/Cast.NET/Cast.NET.csproj" />
     <Project Path="ThirdParty/Topten.RichTextKit/Topten.RichTextKit.csproj" />
   </Folder>
   <Folder Name="/Engine/Tier0/Compiling/">

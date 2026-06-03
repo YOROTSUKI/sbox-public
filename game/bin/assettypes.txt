@@ -629,6 +629,16 @@
 		},
 		{
 			_class = "CSimpleAssetTypeInfo"
+			m_Name = "cast_asset"
+			m_FriendlyName = "CAST Source File"
+			m_Ext = "cast"
+			m_IconLg = "toolimages:assettypes/generic_lg.png"
+			m_IconSm = "toolimages:assettypes/generic_sm.png"
+			m_bHideTypeByDefault = false
+			m_Category = "Rendering"
+		},
+		{
+			_class = "CSimpleAssetTypeInfo"
 			m_Name = "meshgroup_file"
 			m_FriendlyName = "Meshgroup File"
 			m_Ext = "meshgrp"
