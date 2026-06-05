@@ -349,6 +349,27 @@ public partial class AssetList
 		e.Menu.AddOption( label, "open_in_new", () => _ = new CreateModelFromMeshDialog( meshes ) );
 	}
 
+	[Event( "asset.contextmenu", Priority = 51 )]
+	private protected static void OnCastAnimationAssetContext( AssetContextMenu e )
+	{
+		var assets = e.SelectedList
+			.Where( x => x.Asset is not null )
+			.Select( x => x.Asset )
+			.ToList();
+
+		if ( assets.Count == 0 )
+			return;
+
+		var castFiles = assets
+			.Where( x => string.Equals( x.AssetType.FileExtension, "cast", StringComparison.OrdinalIgnoreCase ) )
+			.ToList();
+
+		if ( castFiles.Count == 0 || castFiles.Count != assets.Count )
+			return;
+
+		e.Menu.AddOption( "Create Animated Model..", "movie", () => _ = new CreateAnimatedModelFromCastDialog( castFiles ) );
+	}
+
 	static void RebuildTagMenu( Menu tag_menu, List<AssetEntry> entries )
 	{
 		tag_menu.Clear();

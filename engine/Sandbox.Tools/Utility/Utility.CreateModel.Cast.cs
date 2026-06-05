@@ -19,12 +19,18 @@ public static partial class EditorUtility
 
 	internal sealed class CastMeshData
 	{
+		public ulong SourceHash { get; init; }
 		public string Name { get; init; } = string.Empty;
 		public string MaterialName { get; init; } = CastFallbackMaterial;
 		public global::Vector3[] Positions { get; init; } = [];
 		public CastTriangle[] Faces { get; init; } = [];
 		public global::Vector3[] Normals { get; init; } = [];
 		public global::Vector2[] TexCoords { get; init; } = [];
+		public global::Vector3[] FaceVertexNormals { get; init; } = [];
+		public global::Vector2[] FaceVertexTexCoords { get; init; } = [];
+		public Color32[] BlendIndices { get; init; } = [];
+		public Color32[] BlendWeights { get; init; } = [];
+		public bool UsesSkinning { get; init; }
 		public int SkippedOutOfRangeFaces { get; init; }
 		public int SkippedDegenerateFaces { get; init; }
 	}
@@ -32,7 +38,8 @@ public static partial class EditorUtility
 	internal readonly record struct CastTriangle( int A, int B, int C );
 
 	/// <summary>
-	/// Create a vmdl file from a static CAST model. V1 imports meshes, positions, normals, UV0 and triangle faces.
+	/// Create a vmdl file from a CAST model. Static-only files preserve the existing ModelDoc path;
+	/// skeleton, skinning and animation-capable files use the animated CAST import path.
 	/// </summary>
 	public static unsafe Asset CreateModelFromCastFile( Asset castFile, string targetAbsolutePath, CreateModelFromMeshDialog.CollisionMode collisionMode )
 	{
@@ -60,6 +67,15 @@ public static partial class EditorUtility
 			return null;
 		}
 
+		var castSummary = InspectCastFile( sourcePath );
+		if ( castSummary.HasSkeleton || castSummary.HasWeightData || castSummary.HasAnimation )
+			return CreateAnimatedModelFromCastFiles( castFile, Array.Empty<Asset>(), targetAbsolutePath, collisionMode );
+
+		return CreateStaticModelFromCastFile( cast, sourcePath, targetAbsolutePath, collisionMode );
+	}
+
+	static unsafe Asset CreateStaticModelFromCastFile( Cast.NET.Cast cast, string sourcePath, string targetAbsolutePath, CreateModelFromMeshDialog.CollisionMode collisionMode )
+	{
 		var meshes = new List<CModelMesh>();
 		var collisionTypes = new List<int>();
 
@@ -128,6 +144,18 @@ public static partial class EditorUtility
 		}
 	}
 
+	static SkeletonNode TryGetCastModelSkeleton( ModelNode model )
+	{
+		try
+		{
+			return model?.Skeleton;
+		}
+		catch
+		{
+			return null;
+		}
+	}
+
 	static unsafe bool TryCreateModelMeshFromCast( ModelNode model, MeshNode castMesh, out CModelMesh modelMesh )
 	{
 		modelMesh = default;
@@ -149,35 +177,48 @@ public static partial class EditorUtility
 				modelMesh.AddFace( 0, (IntPtr)pIndices, indices.Length );
 		}
 
-		fixed ( global::Vector3* pNormals = &meshData.Normals[0] )
-			modelMesh.SetNormals( (IntPtr)pNormals, meshData.Normals.Length );
+		fixed ( global::Vector3* pNormals = &meshData.FaceVertexNormals[0] )
+			modelMesh.SetNormals( (IntPtr)pNormals, meshData.FaceVertexNormals.Length );
 
-		fixed ( global::Vector2* pUvs = &meshData.TexCoords[0] )
-			modelMesh.SetTexCoords( (IntPtr)pUvs, meshData.TexCoords.Length );
+		fixed ( global::Vector2* pUvs = &meshData.FaceVertexTexCoords[0] )
+			modelMesh.SetTexCoords( (IntPtr)pUvs, meshData.FaceVertexTexCoords.Length );
 
 		return true;
 	}
 
 	internal static bool TryCreateCastMeshData( ModelNode model, MeshNode castMesh, out CastMeshData meshData )
 	{
+		var context = new CastImportContext( model?.Name ?? castMesh?.Name ?? "<cast>" );
+		try
+		{
+			return TryCreateCastMeshData( model, castMesh, null, context, out meshData );
+		}
+		finally
+		{
+			context.FlushWarnings();
+		}
+	}
+
+	static bool TryCreateCastMeshData( ModelNode model, MeshNode castMesh, CastSkeletonData skeletonData, CastImportContext context, out CastMeshData meshData )
+	{
 		meshData = null;
 
 		if ( !castMesh.Properties.TryGetValue( "vp", out _ ) )
 		{
-			Log.Warning( $"Skipping CAST mesh \"{GetCastMeshName( castMesh )}\" because it has no vertex position buffer." );
+			context.Warn( $"Skipping CAST mesh \"{GetCastMeshName( castMesh )}\" because it has no vertex position buffer." );
 			return false;
 		}
 
 		if ( !castMesh.Properties.TryGetValue( "f", out _ ) )
 		{
-			Log.Warning( $"Skipping CAST mesh \"{GetCastMeshName( castMesh )}\" because it has no face buffer." );
+			context.Warn( $"Skipping CAST mesh \"{GetCastMeshName( castMesh )}\" because it has no face buffer." );
 			return false;
 		}
 
 		var sourcePositions = castMesh.VertexPositionBuffer.Values;
 		if ( sourcePositions.Count == 0 )
 		{
-			Log.Warning( $"Skipping CAST mesh \"{GetCastMeshName( castMesh )}\" because it has no vertices." );
+			context.Warn( $"Skipping CAST mesh \"{GetCastMeshName( castMesh )}\" because it has no vertices." );
 			return false;
 		}
 
@@ -195,18 +236,19 @@ public static partial class EditorUtility
 		var sourceUvs = castMesh.GetUVLayer( 0 )?.Values;
 
 		if ( sourceNormals is null || sourceNormals.Count == 0 )
-			Log.Warning( $"CAST mesh \"{GetCastMeshName( castMesh )}\" has no normals; triangle normals will be generated." );
+			context.Warn( $"CAST mesh \"{GetCastMeshName( castMesh )}\" has no normals; triangle normals will be generated." );
 		else if ( sourceNormals.Count < sourcePositions.Count )
-			Log.Warning( $"CAST mesh \"{GetCastMeshName( castMesh )}\" has fewer normals than vertices; missing normals will be generated." );
+			context.Warn( $"CAST mesh \"{GetCastMeshName( castMesh )}\" has fewer normals than vertices; missing normals will be generated." );
 
 		if ( sourceUvs is null || sourceUvs.Count == 0 )
-			Log.Warning( $"CAST mesh \"{GetCastMeshName( castMesh )}\" has no UV0 layer; zero UVs will be used." );
+			context.Warn( $"CAST mesh \"{GetCastMeshName( castMesh )}\" has no UV0 layer; zero UVs will be used." );
 		else if ( sourceUvs.Count < sourcePositions.Count )
-			Log.Warning( $"CAST mesh \"{GetCastMeshName( castMesh )}\" has fewer UV0 coordinates than vertices; missing UVs will use zero." );
+			context.Warn( $"CAST mesh \"{GetCastMeshName( castMesh )}\" has fewer UV0 coordinates than vertices; missing UVs will use zero." );
 
 		var faces = new List<CastTriangle>();
+		var accumulatedNormals = new NumericsVector3[sourcePositions.Count];
 		var faceVertexNormals = new List<global::Vector3>();
-		var faceVertexUvs = new List<global::Vector2>();
+		var faceVertexTexCoords = new List<global::Vector2>();
 		var skippedOutOfRangeFaces = 0;
 		var skippedDegenerateFaces = 0;
 
@@ -232,31 +274,79 @@ public static partial class EditorUtility
 			}
 
 			faces.Add( new CastTriangle( a, b, c ) );
-			AddFaceVertexData( a, sourceNormals, sourceUvs, transform, faceNormal, faceVertexNormals, faceVertexUvs );
-			AddFaceVertexData( b, sourceNormals, sourceUvs, transform, faceNormal, faceVertexNormals, faceVertexUvs );
-			AddFaceVertexData( c, sourceNormals, sourceUvs, transform, faceNormal, faceVertexNormals, faceVertexUvs );
+			accumulatedNormals[a] += faceNormal;
+			accumulatedNormals[b] += faceNormal;
+			accumulatedNormals[c] += faceNormal;
+			AddFaceVertexData( a, sourceNormals, sourceUvs, transform, faceNormal, faceVertexNormals, faceVertexTexCoords );
+			AddFaceVertexData( b, sourceNormals, sourceUvs, transform, faceNormal, faceVertexNormals, faceVertexTexCoords );
+			AddFaceVertexData( c, sourceNormals, sourceUvs, transform, faceNormal, faceVertexNormals, faceVertexTexCoords );
 		}
 
 		if ( skippedOutOfRangeFaces > 0 )
-			Log.Warning( $"CAST mesh \"{GetCastMeshName( castMesh )}\" skipped {skippedOutOfRangeFaces} face(s) with out-of-range indices." );
+			context.Warn( $"CAST mesh \"{GetCastMeshName( castMesh )}\" skipped {skippedOutOfRangeFaces} face(s) with out-of-range indices." );
 
 		if ( skippedDegenerateFaces > 0 )
-			Log.Warning( $"CAST mesh \"{GetCastMeshName( castMesh )}\" skipped {skippedDegenerateFaces} degenerate face(s)." );
+			context.Warn( $"CAST mesh \"{GetCastMeshName( castMesh )}\" skipped {skippedDegenerateFaces} degenerate face(s)." );
 
 		if ( faces.Count == 0 )
 		{
-			Log.Warning( $"Skipping CAST mesh \"{GetCastMeshName( castMesh )}\" because it has no valid triangle faces." );
+			context.Warn( $"Skipping CAST mesh \"{GetCastMeshName( castMesh )}\" because it has no valid triangle faces." );
 			return false;
+		}
+
+		var normals = new global::Vector3[sourcePositions.Count];
+		var texCoords = new global::Vector2[sourcePositions.Count];
+
+		for ( var i = 0; i < sourcePositions.Count; i++ )
+		{
+			var normal = accumulatedNormals[i];
+			if ( sourceNormals is not null && i < sourceNormals.Count )
+			{
+				var transformedNormal = NumericsVector3.TransformNormal( sourceNormals[i], transform.NormalTransform );
+				if ( TryNormalizeCastVector( transformedNormal, out var normalizedNormal ) )
+					normal = normalizedNormal;
+			}
+
+			if ( !TryNormalizeCastVector( normal, out normal ) )
+				normal = NumericsVector3.UnitZ;
+
+			normals[i] = ToSandboxVector3( normal );
+
+			if ( sourceUvs is not null && i < sourceUvs.Count )
+			{
+				var uv = sourceUvs[i];
+				texCoords[i] = new global::Vector2( uv.X, uv.Y );
+			}
+			else
+			{
+				texCoords[i] = global::Vector2.Zero;
+			}
+		}
+
+		var blendIndices = Array.Empty<Color32>();
+		var blendWeights = Array.Empty<Color32>();
+		var usesSkinning = false;
+
+		if ( skeletonData is not null && skeletonData.Bones.Length > 0 )
+		{
+			usesSkinning = true;
+			TryCreateCastSkinningData( castMesh, sourcePositions.Count, skeletonData, context, out blendIndices, out blendWeights );
 		}
 
 		meshData = new CastMeshData
 		{
+			SourceHash = castMesh.Hash,
 			Name = GetCastMeshName( castMesh ),
 			MaterialName = GetCastMeshMaterial( castMesh ),
 			Positions = positions,
 			Faces = faces.ToArray(),
-			Normals = faceVertexNormals.ToArray(),
-			TexCoords = faceVertexUvs.ToArray(),
+			Normals = normals,
+			TexCoords = texCoords,
+			FaceVertexNormals = faceVertexNormals.ToArray(),
+			FaceVertexTexCoords = faceVertexTexCoords.ToArray(),
+			BlendIndices = blendIndices,
+			BlendWeights = blendWeights,
+			UsesSkinning = usesSkinning,
 			SkippedOutOfRangeFaces = skippedOutOfRangeFaces,
 			SkippedDegenerateFaces = skippedDegenerateFaces
 		};
@@ -271,7 +361,7 @@ public static partial class EditorUtility
 		CastModelTransform transform,
 		NumericsVector3 faceNormal,
 		List<global::Vector3> faceVertexNormals,
-		List<global::Vector2> faceVertexUvs )
+		List<global::Vector2> faceVertexTexCoords )
 	{
 		var normal = faceNormal;
 		if ( sourceNormals is not null && vertexIndex < sourceNormals.Count )
@@ -286,11 +376,11 @@ public static partial class EditorUtility
 		if ( sourceUvs is not null && vertexIndex < sourceUvs.Count )
 		{
 			var uv = sourceUvs[vertexIndex];
-			faceVertexUvs.Add( new global::Vector2( uv.X, uv.Y ) );
+			faceVertexTexCoords.Add( new global::Vector2( uv.X, uv.Y ) );
 		}
 		else
 		{
-			faceVertexUvs.Add( global::Vector2.Zero );
+			faceVertexTexCoords.Add( global::Vector2.Zero );
 		}
 	}
 
@@ -313,6 +403,111 @@ public static partial class EditorUtility
 		return new CastModelTransform( position, rotation, scale, normalTransform );
 	}
 
+	static void TryCreateCastSkinningData(
+		MeshNode castMesh,
+		int vertexCount,
+		CastSkeletonData skeletonData,
+		CastImportContext context,
+		out Color32[] blendIndices,
+		out Color32[] blendWeights )
+	{
+		blendIndices = new Color32[vertexCount];
+		blendWeights = new Color32[vertexCount];
+
+		if ( castMesh.VertexWeightBoneBuffer is null || castMesh.VertexWeightValueBuffer is null )
+		{
+			context.Warn( $"CAST mesh \"{GetCastMeshName( castMesh )}\" has a skeleton but no weight buffers; using root-bone weights." );
+			FillDefaultCastWeights( blendIndices, blendWeights );
+			return;
+		}
+
+		var maximumInfluence = castMesh.Properties.ContainsKey( "mi" ) ? castMesh.MaximumWeightInfluence : 0;
+		var weightCount = castMesh.VertexWeightValueBuffer.ValueCount;
+
+		if ( maximumInfluence <= 0 )
+		{
+			if ( vertexCount > 0 && (weightCount % vertexCount) == 0 )
+				maximumInfluence = weightCount / vertexCount;
+			else
+				maximumInfluence = 1;
+		}
+
+		if ( maximumInfluence <= 0 || (vertexCount * maximumInfluence) > weightCount || castMesh.VertexWeightBoneBuffer.ValueCount < (vertexCount * maximumInfluence) )
+		{
+			context.Warn( $"CAST mesh \"{GetCastMeshName( castMesh )}\" has mismatched skinning buffers; using root-bone weights." );
+			FillDefaultCastWeights( blendIndices, blendWeights );
+			return;
+		}
+
+		var allWeights = castMesh.EnumerateBoneWeights().ToArray();
+		for ( var vertexIndex = 0; vertexIndex < vertexCount; vertexIndex++ )
+		{
+			var start = vertexIndex * maximumInfluence;
+			var influences = new List<(int BoneIndex, float Weight)>( maximumInfluence );
+
+			for ( var influenceIndex = 0; influenceIndex < maximumInfluence; influenceIndex++ )
+			{
+				var weightEntry = allWeights[start + influenceIndex];
+				if ( !IsValidCastBoneIndex( weightEntry.Item1, skeletonData.Bones.Length ) )
+					continue;
+
+				var weightValue = weightEntry.Item2;
+				if ( weightValue <= 0.0f || float.IsNaN( weightValue ) || float.IsInfinity( weightValue ) )
+					continue;
+
+				influences.Add( (weightEntry.Item1, weightValue) );
+			}
+
+			if ( influences.Count == 0 )
+			{
+				blendIndices[vertexIndex] = new Color32( 0, 0, 0, 0 );
+				blendWeights[vertexIndex] = new Color32( 255, 0, 0, 0 );
+				continue;
+			}
+
+			influences.Sort( static ( a, b ) => b.Weight.CompareTo( a.Weight ) );
+			if ( influences.Count > 4 )
+				influences.RemoveRange( 4, influences.Count - 4 );
+
+			var totalWeight = influences.Sum( x => x.Weight );
+			if ( totalWeight <= 0.0f )
+			{
+				blendIndices[vertexIndex] = new Color32( 0, 0, 0, 0 );
+				blendWeights[vertexIndex] = new Color32( 255, 0, 0, 0 );
+				continue;
+			}
+
+			var normalizedWeights = new int[4];
+			var normalizedBones = new byte[4];
+			for ( var i = 0; i < influences.Count; i++ )
+			{
+				normalizedBones[i] = (byte)influences[i].BoneIndex;
+				normalizedWeights[i] = (int)MathF.Round( influences[i].Weight / totalWeight * 255.0f );
+			}
+
+			var weightDelta = 255 - normalizedWeights.Sum();
+			var dominantIndex = Array.IndexOf( normalizedWeights, normalizedWeights.Max() );
+			if ( dominantIndex >= 0 )
+				normalizedWeights[dominantIndex] += weightDelta;
+
+			blendIndices[vertexIndex] = new Color32( normalizedBones[0], normalizedBones[1], normalizedBones[2], normalizedBones[3] );
+			blendWeights[vertexIndex] = new Color32(
+				(byte)Math.Clamp( normalizedWeights[0], 0, 255 ),
+				(byte)Math.Clamp( normalizedWeights[1], 0, 255 ),
+				(byte)Math.Clamp( normalizedWeights[2], 0, 255 ),
+				(byte)Math.Clamp( normalizedWeights[3], 0, 255 ) );
+		}
+	}
+
+	static void FillDefaultCastWeights( Color32[] blendIndices, Color32[] blendWeights )
+	{
+		for ( var i = 0; i < blendIndices.Length; i++ )
+		{
+			blendIndices[i] = new Color32( 0, 0, 0, 0 );
+			blendWeights[i] = new Color32( 255, 0, 0, 0 );
+		}
+	}
+
 	static NumericsVector3 TransformCastPosition( NumericsVector3 position, CastModelTransform transform )
 	{
 		position *= transform.Scale;
@@ -323,6 +518,11 @@ public static partial class EditorUtility
 	static bool IsValidCastFaceIndex( int index, int vertexCount )
 	{
 		return index >= 0 && index < vertexCount;
+	}
+
+	static bool IsValidCastBoneIndex( int index, int boneCount )
+	{
+		return index >= 0 && index < boneCount;
 	}
 
 	static bool TryNormalizeCastVector( NumericsVector3 vector, out NumericsVector3 normal )
