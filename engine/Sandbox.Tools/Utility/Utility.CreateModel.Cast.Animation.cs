@@ -73,6 +73,12 @@ public static partial class EditorUtility
 		public CastConstraintData[] Constraints { get; init; } = [];
 	}
 
+	internal sealed class CastAnimatedImportData
+	{
+		public CastSourceData SourceData { get; init; }
+		public List<CastAnimationData> Animations { get; init; } = [];
+	}
+
 	internal sealed class CastSkeletonData
 	{
 		public CastBoneData[] Bones { get; init; } = [];
@@ -85,6 +91,7 @@ public static partial class EditorUtility
 	internal sealed class CastAnimationData
 	{
 		public string Name { get; init; } = string.Empty;
+		public string SourcePath { get; init; } = string.Empty;
 		public float FrameRate { get; init; } = 30.0f;
 		public bool Looping { get; init; }
 		public bool HasScaleKeys { get; init; }
@@ -280,6 +287,23 @@ public static partial class EditorUtility
 		CreateModelFromMeshDialog.CollisionMode collisionMode,
 		CastAnimatedModelImportOptions options )
 	{
+		return CreateAnimatedModelFromCastFiles(
+			modelCastFile,
+			animationCastFiles,
+			targetAbsolutePath,
+			collisionMode,
+			options,
+			Array.Empty<Asset>() );
+	}
+
+	public static Asset CreateAnimatedModelFromCastFiles(
+		Asset modelCastFile,
+		IReadOnlyList<Asset> animationCastFiles,
+		string targetAbsolutePath,
+		CreateModelFromMeshDialog.CollisionMode collisionMode,
+		CastAnimatedModelImportOptions options,
+		IReadOnlyList<Asset> rigsetFiles )
+	{
 		if ( modelCastFile is null )
 			return null;
 
@@ -295,53 +319,11 @@ public static partial class EditorUtility
 		var context = new CastImportContext( sourcePath );
 		try
 		{
-			if ( !TryLoadCastFile( sourcePath, context, out var baseCast ) )
+			if ( !TryCollectCastAnimatedImportData( sourcePath, GetCastAssetPaths( animationCastFiles ), options, context, out var importData ) )
 				return null;
 
-			if ( !TryCreateCastSourceData( baseCast, Path.GetFileNameWithoutExtension( sourcePath ), context, out var sourceData ) )
-				return null;
-
-			var animations = new List<CastAnimationData>();
-			var usedAnimationNames = new HashSet<string>( StringComparer.OrdinalIgnoreCase );
-
-			if ( sourceData.Skeleton is not null )
-			{
-				AddCastAnimations(
-					baseCast,
-					sourceData.Skeleton,
-					Path.GetFileNameWithoutExtension( sourcePath ),
-					context,
-					animations,
-					usedAnimationNames );
-			}
-
-			if ( sourceData.Skeleton is not null && animationCastFiles is not null )
-			{
-				for ( var i = 0; i < animationCastFiles.Count; i++ )
-				{
-					var animationAsset = animationCastFiles[i];
-					if ( animationAsset is null )
-						continue;
-
-					var animationPath = animationAsset.AbsolutePath;
-					if ( string.IsNullOrWhiteSpace( animationPath ) || !File.Exists( animationPath ) )
-						continue;
-
-					if ( string.Equals( animationPath, sourcePath, StringComparison.OrdinalIgnoreCase ) )
-						continue;
-
-					if ( !TryLoadCastFile( animationPath, context, out var animationCast ) )
-						continue;
-
-					var fallbackName = Path.GetFileNameWithoutExtension( animationPath );
-					AddCastAnimations( animationCast, sourceData.Skeleton, fallbackName, context, animations, usedAnimationNames );
-				}
-			}
-
-			if ( !TryApplyCastRootMotionOptions( sourceData.Skeleton, animations, options, context ) )
-				return null;
-
-			if ( !TryWriteCastModel( sourceData, animations, targetAbsolutePath, collisionMode, options, context ) )
+			var rigsets = LoadRigsetReferences( rigsetFiles, context );
+			if ( !TryWriteCastModel( importData.SourceData, importData.Animations, targetAbsolutePath, collisionMode, options, context, rigsets ) )
 				return null;
 
 			var asset = AssetSystem.RegisterFile( targetAbsolutePath );
@@ -360,6 +342,85 @@ public static partial class EditorUtility
 		{
 			context.FlushWarnings();
 		}
+	}
+
+	static IReadOnlyList<string> GetCastAssetPaths( IReadOnlyList<Asset> castFiles )
+	{
+		if ( castFiles is null || castFiles.Count == 0 )
+			return [];
+
+		var paths = new List<string>( castFiles.Count );
+		foreach ( var asset in castFiles )
+		{
+			if ( asset is not null && !string.IsNullOrWhiteSpace( asset.AbsolutePath ) )
+				paths.Add( asset.AbsolutePath );
+		}
+
+		return paths;
+	}
+
+	internal static bool TryCollectCastAnimatedImportData(
+		string baseCastPath,
+		IReadOnlyList<string> animationCastPaths,
+		CastAnimatedModelImportOptions options,
+		CastImportContext context,
+		out CastAnimatedImportData importData )
+	{
+		importData = null;
+		options ??= CastAnimatedModelImportOptions.BasicOnly;
+
+		if ( string.IsNullOrWhiteSpace( baseCastPath ) || !File.Exists( baseCastPath ) )
+			return false;
+
+		if ( !TryLoadCastFile( baseCastPath, context, out var baseCast ) )
+			return false;
+
+		if ( !TryCreateCastSourceData( baseCast, Path.GetFileNameWithoutExtension( baseCastPath ), context, out var sourceData ) )
+			return false;
+
+		var animations = new List<CastAnimationData>();
+		var usedAnimationNames = new HashSet<string>( StringComparer.OrdinalIgnoreCase );
+
+		if ( sourceData.Skeleton is not null )
+		{
+			AddCastAnimations(
+				baseCast,
+				sourceData.Skeleton,
+				Path.GetFileNameWithoutExtension( baseCastPath ),
+				context,
+				animations,
+				usedAnimationNames,
+				baseCastPath );
+		}
+
+		if ( sourceData.Skeleton is not null && animationCastPaths is not null )
+		{
+			for ( var i = 0; i < animationCastPaths.Count; i++ )
+			{
+				var animationPath = animationCastPaths[i];
+				if ( string.IsNullOrWhiteSpace( animationPath ) || !File.Exists( animationPath ) )
+					continue;
+
+				if ( string.Equals( animationPath, baseCastPath, StringComparison.OrdinalIgnoreCase ) )
+					continue;
+
+				if ( !TryLoadCastFile( animationPath, context, out var animationCast ) )
+					continue;
+
+				var fallbackName = Path.GetFileNameWithoutExtension( animationPath );
+				AddCastAnimations( animationCast, sourceData.Skeleton, fallbackName, context, animations, usedAnimationNames, animationPath );
+			}
+		}
+
+		if ( !TryApplyCastRootMotionOptions( sourceData.Skeleton, animations, options, context ) )
+			return false;
+
+		importData = new CastAnimatedImportData
+		{
+			SourceData = sourceData,
+			Animations = animations
+		};
+		return true;
 	}
 
 	internal static CastFileSummary InspectCastFile( string sourcePath )
@@ -835,7 +896,8 @@ public static partial class EditorUtility
 		string fallbackName,
 		CastImportContext context,
 		List<CastAnimationData> animations,
-		HashSet<string> usedAnimationNames )
+		HashSet<string> usedAnimationNames,
+		string sourcePath = "" )
 	{
 		if ( cast is null || skeletonData is null || animations is null || usedAnimationNames is null )
 			return;
@@ -843,7 +905,7 @@ public static partial class EditorUtility
 		foreach ( var animationNode in EnumerateCastAnimations( cast ) )
 		{
 			var animationName = GetUniqueCastAnimationName( fallbackName, usedAnimationNames );
-			if ( TryCreateCastAnimationData( animationNode, skeletonData, animationName, context, out var animationData ) )
+			if ( TryCreateCastAnimationData( animationNode, skeletonData, animationName, context, out var animationData, sourcePath ) )
 			{
 				animations.Add( animationData );
 			}
@@ -854,7 +916,7 @@ public static partial class EditorUtility
 		}
 	}
 
-	internal static bool TryCreateCastAnimationData( AnimationNode animationNode, CastSkeletonData skeletonData, string animationName, CastImportContext context, out CastAnimationData animationData )
+	internal static bool TryCreateCastAnimationData( AnimationNode animationNode, CastSkeletonData skeletonData, string animationName, CastImportContext context, out CastAnimationData animationData, string sourcePath = "" )
 	{
 		animationData = null;
 
@@ -1008,6 +1070,7 @@ public static partial class EditorUtility
 		animationData = new CastAnimationData
 		{
 			Name = animationName,
+			SourcePath = sourcePath ?? string.Empty,
 			FrameRate = frameRate,
 			Looping = animationNode.Looping,
 			HasScaleKeys = hasScaleKeys,
@@ -1134,14 +1197,15 @@ public static partial class EditorUtility
 		string targetAbsolutePath,
 		CreateModelFromMeshDialog.CollisionMode collisionMode,
 		CastAnimatedModelImportOptions options,
-		CastImportContext context )
+		CastImportContext context,
+		IReadOnlyList<RigsetReferenceData> rigsets = null )
 	{
 		options ??= CastAnimatedModelImportOptions.BasicOnly;
 
 		if ( !TrySelectCastModelSourceWriter( sourceData, animations, options, context, out var writer ) )
 			return false;
 
-		return writer.TryWrite( sourceData, animations, targetAbsolutePath, collisionMode, context );
+		return writer.TryWrite( sourceData, animations, targetAbsolutePath, collisionMode, context, rigsets );
 	}
 
 	internal static bool TrySelectCastModelSourceWriter(
@@ -1180,7 +1244,8 @@ public static partial class EditorUtility
 		IReadOnlyList<CastAnimationData> animations,
 		string targetAbsolutePath,
 		CreateModelFromMeshDialog.CollisionMode collisionMode,
-		CastImportContext context )
+		CastImportContext context,
+		IReadOnlyList<RigsetReferenceData> rigsets = null )
 	{
 		try
 		{
@@ -1246,6 +1311,9 @@ public static partial class EditorUtility
 					exportedAnimations.Add( new CastGeneratedAnimationFile( animation, animationRelativePath ) );
 				}
 			}
+
+			if ( !TryAppendRigsetAnimations( sourceData.Skeleton, rigsets, exportedAnimations, context ) )
+				return false;
 
 			var includeCollision = collisionMode != CreateModelFromMeshDialog.CollisionMode.None && !needsPlaceholderMesh;
 			File.WriteAllText(
@@ -1531,29 +1599,7 @@ public static partial class EditorUtility
 
 		foreach ( var animation in animations )
 		{
-			builder.AppendLine( "\t\t\t\t\t{" );
-			builder.AppendLine( "\t\t\t\t\t\t_class = \"AnimFile\"" );
-			builder.AppendLine( $"\t\t\t\t\t\tname = \"{EscapeKv3String( animation.Animation.Name )}\"" );
-			builder.AppendLine( "\t\t\t\t\t\tactivity_name = \"\"" );
-			builder.AppendLine( "\t\t\t\t\t\tactivity_weight = 1" );
-			builder.AppendLine( "\t\t\t\t\t\tweight_list_name = \"\"" );
-			builder.AppendLine( "\t\t\t\t\t\tfade_in_time = 0.2" );
-			builder.AppendLine( "\t\t\t\t\t\tfade_out_time = 0.2" );
-			builder.AppendLine( $"\t\t\t\t\t\tlooping = {FormatBool( animation.Animation.Looping )}" );
-			builder.AppendLine( "\t\t\t\t\t\tdelta = false" );
-			builder.AppendLine( "\t\t\t\t\t\tworldSpace = false" );
-			builder.AppendLine( "\t\t\t\t\t\thidden = false" );
-			builder.AppendLine( "\t\t\t\t\t\tanim_markup_ordered = false" );
-			builder.AppendLine( "\t\t\t\t\t\tdisable_compression = false" );
-			builder.AppendLine( "\t\t\t\t\t\tdisable_interpolation = false" );
-			builder.AppendLine( "\t\t\t\t\t\tenable_scale = false" );
-			builder.AppendLine( $"\t\t\t\t\t\tsource_filename = \"{EscapeKv3String( animation.RelativePath )}\"" );
-			builder.AppendLine( "\t\t\t\t\t\tstart_frame = -1" );
-			builder.AppendLine( "\t\t\t\t\t\tend_frame = -1" );
-			builder.AppendLine( $"\t\t\t\t\t\tframerate = {FormatFloat( animation.Animation.FrameRate )}" );
-			builder.AppendLine( "\t\t\t\t\t\ttake = 0" );
-			builder.AppendLine( "\t\t\t\t\t\treverse = false" );
-			builder.AppendLine( "\t\t\t\t\t}," );
+			AppendCastAnimFileModelDocText( builder, animation, "\t\t\t\t\t" );
 		}
 
 		builder.AppendLine( "\t\t\t\t]" );
@@ -1588,6 +1634,33 @@ public static partial class EditorUtility
 		builder.AppendLine( "\t}" );
 		builder.AppendLine( "}" );
 		return builder.ToString();
+	}
+
+	static void AppendCastAnimFileModelDocText( StringBuilder builder, CastGeneratedAnimationFile animation, string indent )
+	{
+		builder.AppendLine( $"{indent}{{" );
+		builder.AppendLine( $"{indent}\t_class = \"AnimFile\"" );
+		builder.AppendLine( $"{indent}\tname = \"{EscapeKv3String( animation.Animation.Name )}\"" );
+		builder.AppendLine( $"{indent}\tactivity_name = \"\"" );
+		builder.AppendLine( $"{indent}\tactivity_weight = 1" );
+		builder.AppendLine( $"{indent}\tweight_list_name = \"\"" );
+		builder.AppendLine( $"{indent}\tfade_in_time = 0.2" );
+		builder.AppendLine( $"{indent}\tfade_out_time = 0.2" );
+		builder.AppendLine( $"{indent}\tlooping = {FormatBool( animation.Animation.Looping )}" );
+		builder.AppendLine( $"{indent}\tdelta = false" );
+		builder.AppendLine( $"{indent}\tworldSpace = false" );
+		builder.AppendLine( $"{indent}\thidden = false" );
+		builder.AppendLine( $"{indent}\tanim_markup_ordered = false" );
+		builder.AppendLine( $"{indent}\tdisable_compression = false" );
+		builder.AppendLine( $"{indent}\tdisable_interpolation = false" );
+		builder.AppendLine( $"{indent}\tenable_scale = false" );
+		builder.AppendLine( $"{indent}\tsource_filename = \"{EscapeKv3String( animation.RelativePath )}\"" );
+		builder.AppendLine( $"{indent}\tstart_frame = -1" );
+		builder.AppendLine( $"{indent}\tend_frame = -1" );
+		builder.AppendLine( $"{indent}\tframerate = {FormatFloat( animation.Animation.FrameRate )}" );
+		builder.AppendLine( $"{indent}\ttake = 0" );
+		builder.AppendLine( $"{indent}\treverse = false" );
+		builder.AppendLine( $"{indent}}}," );
 	}
 
 	internal static string CreateCastModelDocTextForTests( CastSourceData sourceData, IReadOnlyList<CastAnimationData> animations )
@@ -1761,7 +1834,7 @@ public static partial class EditorUtility
 		influences.Add( new CastVertexWeight( boneIndex, weightByte / 255.0f ) );
 	}
 
-	static bool TryGetAssetRelativePath( string absolutePath, CastImportContext context, out string relativePath )
+	internal static bool TryGetAssetRelativePath( string absolutePath, CastImportContext context, out string relativePath )
 	{
 		var assetsPath = Project.Current?.GetAssetsPath();
 		if ( string.IsNullOrWhiteSpace( assetsPath ) )
@@ -1884,7 +1957,7 @@ public static partial class EditorUtility
 
 	readonly record struct CastGeneratedMaterial( string SourceName, string TargetMaterialName );
 
-	readonly record struct CastGeneratedAnimationFile( CastAnimationData Animation, string RelativePath );
+	internal readonly record struct CastGeneratedAnimationFile( CastAnimationData Animation, string RelativePath );
 
 	readonly record struct CastVertexWeight( int BoneIndex, float Weight );
 
@@ -1897,7 +1970,8 @@ public static partial class EditorUtility
 			IReadOnlyList<CastAnimationData> animations,
 			string targetAbsolutePath,
 			CreateModelFromMeshDialog.CollisionMode collisionMode,
-			CastImportContext context );
+			CastImportContext context,
+			IReadOnlyList<RigsetReferenceData> rigsets );
 	}
 
 	sealed class SmdCastModelSourceWriter : ICastModelSourceWriter
@@ -1915,9 +1989,10 @@ public static partial class EditorUtility
 			IReadOnlyList<CastAnimationData> animations,
 			string targetAbsolutePath,
 			CreateModelFromMeshDialog.CollisionMode collisionMode,
-			CastImportContext context )
+			CastImportContext context,
+			IReadOnlyList<RigsetReferenceData> rigsets )
 		{
-			return TryWriteSmdCastModel( sourceData, animations, targetAbsolutePath, collisionMode, context );
+			return TryWriteSmdCastModel( sourceData, animations, targetAbsolutePath, collisionMode, context, rigsets );
 		}
 	}
 
@@ -1936,7 +2011,8 @@ public static partial class EditorUtility
 			IReadOnlyList<CastAnimationData> animations,
 			string targetAbsolutePath,
 			CreateModelFromMeshDialog.CollisionMode collisionMode,
-			CastImportContext context )
+			CastImportContext context,
+			IReadOnlyList<RigsetReferenceData> rigsets )
 		{
 			CanWriteAdvancedData( sourceData, animations, CastAnimatedModelImportOptions.BasicOnly, out var reason );
 			context.Warn( $"Skipping DMX CAST export: {reason}" );

@@ -4,25 +4,23 @@ using System.IO;
 namespace Editor;
 
 /// <summary>
-/// A popup dialog for creating animated models from CAST skeleton/model files plus CAST animation files.
+/// A popup dialog for creating reusable animation rigsets from CAST animation files.
 /// </summary>
-public class CreateAnimatedModelFromCastDialog : Widget
+public class CreateAnimationRigsetFromCastDialog : Widget
 {
 	readonly Asset _baseCast;
 	readonly List<Asset> _selectedAnimations;
 	readonly bool _useAnimationFolder;
-	readonly ComboBox _collisionCombo;
 	readonly ComboBox _advancedDataCombo;
 	readonly ComboBox _rootMotionModeCombo;
 	readonly ComboBox _rootMotionBoneCombo;
 	readonly LineEdit _fileEdit;
-	readonly LineEdit _rigsetFilesEdit;
 	readonly FolderEdit _animationFolderEdit;
 	readonly Widget _animationFolderRow;
 	readonly Widget _rootMotionModeRow;
 	readonly Widget _rootMotionBoneRow;
 
-	public CreateAnimatedModelFromCastDialog( List<Asset> castFiles ) : base( null )
+	public CreateAnimationRigsetFromCastDialog( List<Asset> castFiles ) : base( null )
 	{
 		_baseCast = ResolveBaseCast( castFiles );
 		_selectedAnimations = ResolveSelectedAnimations( castFiles, _baseCast );
@@ -31,42 +29,22 @@ public class CreateAnimatedModelFromCastDialog : Widget
 		WindowFlags = WindowFlags.Dialog | WindowFlags.Customized | WindowFlags.WindowTitle | WindowFlags.CloseButton | WindowFlags.WindowSystemMenuHint;
 		DeleteOnClose = true;
 		WindowTitle = _baseCast is not null
-			? $"Create Animated Model from {Path.GetFileName( _baseCast.AbsolutePath )}"
-			: "Create Animated Model";
-		SetWindowIcon( "movie" );
+			? $"Create Animation Rigset from {Path.GetFileName( _baseCast.AbsolutePath )}"
+			: "Create Animation Rigset";
+		SetWindowIcon( "animation" );
 
 		Layout = Layout.Column();
 		Layout.Margin = 16;
 		Layout.Spacing = 8;
 
 		if ( _baseCast is not null )
-		{
 			Layout.Add( new Label( $"Base CAST: {Path.GetFileName( _baseCast.AbsolutePath )}" ) { Color = Theme.TextControl.WithAlpha( 0.8f ) } );
-		}
 
-		if ( _selectedAnimations.Count > 0 )
-		{
-			Layout.Add( new Label( $"Animation CASTs: {_selectedAnimations.Count}" ) { Color = Theme.TextControl.WithAlpha( 0.7f ) } );
-		}
-		else
-		{
-			Layout.Add( new Label( "Select an animation folder to import CAST animation sequences." ) { Color = Theme.TextControl.WithAlpha( 0.7f ) } );
-		}
-
+		Layout.Add( new Label( $"Animation CASTs: {(_selectedAnimations.Count > 0 ? _selectedAnimations.Count.ToString() : "folder")}" ) { Color = Theme.TextControl.WithAlpha( 0.7f ) } );
 		Layout.AddSpacingCell( 4 );
 
-		AddRow( "Collision", _collisionCombo = new ComboBox( this ) );
-		_collisionCombo.AddItem( "Convex Hull", icon: "change_history" );
-		_collisionCombo.AddItem( "Exact Mesh", icon: "grid_on" );
-		_collisionCombo.AddItem( "None", icon: "block" );
-		_collisionCombo.CurrentIndex = 2;
-
-		var defaultFile = _baseCast is not null
-			? Path.ChangeExtension( _baseCast.AbsolutePath, ".vmdl" )
-			: string.Empty;
-
 		_fileEdit = new LineEdit( this );
-		_fileEdit.Text = defaultFile;
+		_fileEdit.Text = GuessRigsetOutputPath( _baseCast, _selectedAnimations );
 		_fileEdit.AddOptionToEnd( new Option( "Browse", "folder", BrowseFile ) );
 		AddRow( "Save To", _fileEdit );
 
@@ -74,10 +52,6 @@ public class CreateAnimatedModelFromCastDialog : Widget
 		_animationFolderEdit.Text = GuessAnimationFolder( _baseCast );
 		_animationFolderRow = AddRow( "Anim Folder", _animationFolderEdit );
 		_animationFolderRow.Visible = _useAnimationFolder;
-
-		_rigsetFilesEdit = new LineEdit( this );
-		_rigsetFilesEdit.AddOptionToEnd( new Option( "Browse", "animation", BrowseRigsetFile ) );
-		AddRow( "Rigsets", _rigsetFilesEdit );
 
 		Layout.AddSpacingCell( 4 );
 		Layout.Add( new Label( "Advanced Data" ) { Color = Theme.TextControl.WithAlpha( 0.85f ) } );
@@ -111,7 +85,7 @@ public class CreateAnimatedModelFromCastDialog : Widget
 
 		footer.AddSpacingCell( 8 );
 
-		var createButton = new Button.Primary( "Create", "movie" );
+		var createButton = new Button.Primary( "Create", "animation" );
 		createButton.Clicked = OnCreate;
 		footer.Add( createButton );
 
@@ -119,7 +93,7 @@ public class CreateAnimatedModelFromCastDialog : Widget
 		AdjustSize();
 		FixedHeight = Height;
 
-		var geo = EditorCookie.GetString( "CreateAnimatedModelFromCastDialog.Geometry", null );
+		var geo = EditorCookie.GetString( "CreateAnimationRigsetFromCastDialog.Geometry", null );
 		if ( geo is not null )
 		{
 			RestoreGeometry( geo );
@@ -134,9 +108,16 @@ public class CreateAnimatedModelFromCastDialog : Widget
 		Focus();
 	}
 
+	public CreateAnimationRigsetFromCastDialog( DirectoryInfo folder )
+		: this( ResolveCastAssetsFromFolder( folder ) )
+	{
+		if ( folder is not null && _useAnimationFolder )
+			_animationFolderEdit.Text = folder.FullName;
+	}
+
 	protected override void OnClosed()
 	{
-		EditorCookie.SetString( "CreateAnimatedModelFromCastDialog.Geometry", SaveGeometry() );
+		EditorCookie.SetString( "CreateAnimationRigsetFromCastDialog.Geometry", SaveGeometry() );
 		base.OnClosed();
 	}
 
@@ -153,33 +134,10 @@ public class CreateAnimatedModelFromCastDialog : Widget
 
 	void BrowseFile()
 	{
-		var result = EditorUtility.SaveFileDialog( "Save Animated Model As..", "vmdl", _fileEdit.Text );
+		var result = EditorUtility.SaveFileDialog( "Save Animation Rigset As..", "rigset", _fileEdit.Text );
 		if ( result is not null )
 			_fileEdit.Text = result;
 	}
-
-	void BrowseRigsetFile()
-	{
-		var defaultPath = _baseCast is not null
-			? Path.ChangeExtension( _baseCast.AbsolutePath, ".rigset" )
-			: $"{Project.Current?.GetAssetsPath()}/";
-
-		var result = EditorUtility.OpenFileDialog( "Open Animation Rigset..", "rigset", defaultPath );
-		if ( result is null )
-			return;
-
-		if ( string.IsNullOrWhiteSpace( _rigsetFilesEdit.Text ) )
-			_rigsetFilesEdit.Text = result;
-		else
-			_rigsetFilesEdit.Text = $"{_rigsetFilesEdit.Text};{result}";
-	}
-
-	CreateModelFromMeshDialog.CollisionMode SelectedCollision => _collisionCombo.CurrentIndex switch
-	{
-		0 => CreateModelFromMeshDialog.CollisionMode.Hull,
-		1 => CreateModelFromMeshDialog.CollisionMode.Mesh,
-		_ => CreateModelFromMeshDialog.CollisionMode.None,
-	};
 
 	void OnCreate()
 	{
@@ -187,7 +145,7 @@ public class CreateAnimatedModelFromCastDialog : Widget
 
 		if ( _baseCast is null )
 		{
-			Log.Warning( "Could not determine a base CAST file for animated model creation." );
+			Log.Warning( "Could not determine a base CAST file for animation rigset creation." );
 			return;
 		}
 
@@ -196,14 +154,14 @@ public class CreateAnimatedModelFromCastDialog : Widget
 
 		var baseSummary = EditorUtility.InspectCastFile( _baseCast.AbsolutePath );
 		var animationFiles = ResolveAnimationFiles();
-		var rigsetFiles = ResolveRigsetFiles();
-		if ( !baseSummary.HasAnimation && animationFiles.Count == 0 && rigsetFiles.Count == 0 )
+		if ( !baseSummary.HasAnimation && animationFiles.Count == 0 )
 		{
 			Log.Warning( $"No CAST animation files were found for base file \"{Path.GetFileName( _baseCast.AbsolutePath )}\"." );
 			return;
 		}
 
-		EditorUtility.CreateAnimatedModelFromCastFiles( _baseCast, animationFiles, _fileEdit.Text, SelectedCollision, SelectedImportOptions, rigsetFiles );
+		var animationFolder = _useAnimationFolder ? _animationFolderEdit.Text : string.Empty;
+		EditorUtility.CreateAnimationRigsetFromCastFiles( _baseCast, animationFiles, animationFolder, _fileEdit.Text, SelectedImportOptions );
 	}
 
 	void PopulateRootMotionBones()
@@ -264,41 +222,9 @@ public class CreateAnimatedModelFromCastDialog : Widget
 		if ( string.IsNullOrWhiteSpace( folderPath ) || !Directory.Exists( folderPath ) )
 			return [];
 
-		var files = new List<Asset>();
-		foreach ( var filePath in Directory.GetFiles( folderPath, "*.cast", SearchOption.TopDirectoryOnly ) )
-		{
-			if ( string.Equals( filePath, _baseCast.AbsolutePath, StringComparison.OrdinalIgnoreCase ) )
-				continue;
-
-			var summary = EditorUtility.InspectCastFile( filePath );
-			if ( !summary.HasAnimation )
-				continue;
-
-			var asset = AssetSystem.FindByPath( filePath ) ?? AssetSystem.RegisterFile( filePath );
-			if ( asset is not null )
-				files.Add( asset );
-		}
-
-		return files;
-	}
-
-	List<Asset> ResolveRigsetFiles()
-	{
-		if ( string.IsNullOrWhiteSpace( _rigsetFilesEdit.Text ) )
-			return [];
-
-		var files = new List<Asset>();
-		foreach ( var path in _rigsetFilesEdit.Text.Split( [';', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries ) )
-		{
-			if ( string.IsNullOrWhiteSpace( path ) || !File.Exists( path ) )
-				continue;
-
-			var asset = AssetSystem.FindByPath( path ) ?? AssetSystem.RegisterFile( path );
-			if ( asset is not null && string.Equals( asset.AssetType.FileExtension, "rigset", StringComparison.OrdinalIgnoreCase ) )
-				files.Add( asset );
-		}
-
-		return files;
+		return ResolveCastAssetsFromFolder( new DirectoryInfo( folderPath ) )
+			.Where( x => x != _baseCast && EditorUtility.InspectCastFile( x.AbsolutePath ).HasAnimation )
+			.ToList();
 	}
 
 	static Asset ResolveBaseCast( IReadOnlyList<Asset> castFiles )
@@ -315,7 +241,7 @@ public class CreateAnimatedModelFromCastDialog : Widget
 			return null;
 
 		return candidates
-			.OrderByDescending( x => ScoreCastFile( x.Summary ) )
+			.OrderByDescending( x => CreateAnimatedModelFromCastDialog.ScoreCastFile( x.Summary ) )
 			.Select( x => x.Asset )
 			.FirstOrDefault();
 	}
@@ -323,7 +249,6 @@ public class CreateAnimatedModelFromCastDialog : Widget
 	static List<Asset> ResolveSelectedAnimations( IReadOnlyList<Asset> castFiles, Asset baseCast )
 	{
 		var animations = new List<Asset>();
-
 		if ( castFiles is null )
 			return animations;
 
@@ -341,25 +266,20 @@ public class CreateAnimatedModelFromCastDialog : Widget
 		return animations;
 	}
 
-	internal static int ScoreCastFile( EditorUtility.CastFileSummary summary )
+	static List<Asset> ResolveCastAssetsFromFolder( DirectoryInfo folder )
 	{
-		var score = 0;
+		if ( folder is null || !folder.Exists )
+			return [];
 
-		if ( summary.HasMesh && summary.HasSkeleton )
-			score += 10000;
-		else if ( summary.HasSkeleton )
-			score += 5000;
-		else if ( summary.HasMesh && summary.HasWeightData )
-			score += 1000;
-		else if ( summary.HasMesh )
-			score += 100;
+		var files = new List<Asset>();
+		foreach ( var filePath in Directory.GetFiles( folder.FullName, "*.cast", SearchOption.TopDirectoryOnly ).OrderBy( x => x, StringComparer.OrdinalIgnoreCase ) )
+		{
+			var asset = AssetSystem.FindByPath( filePath ) ?? AssetSystem.RegisterFile( filePath );
+			if ( asset is not null )
+				files.Add( asset );
+		}
 
-		if ( summary.HasModelNode )
-			score += 10;
-		if ( summary.HasAnimation )
-			score += 1;
-
-		return score;
+		return files;
 	}
 
 	static string GuessAnimationFolder( Asset baseCast )
@@ -370,5 +290,20 @@ public class CreateAnimatedModelFromCastDialog : Widget
 		var baseDirectory = Path.GetDirectoryName( baseCast.AbsolutePath );
 		var guess = Path.Combine( baseDirectory ?? string.Empty, $"anims_{Path.GetFileNameWithoutExtension( baseCast.AbsolutePath )}" );
 		return Directory.Exists( guess ) ? guess : baseDirectory;
+	}
+
+	static string GuessRigsetOutputPath( Asset baseCast, IReadOnlyList<Asset> selectedAnimations )
+	{
+		var animationDirectory = selectedAnimations?.FirstOrDefault()?.AbsolutePath is { } animationPath
+			? Path.GetDirectoryName( animationPath )
+			: GuessAnimationFolder( baseCast );
+
+		if ( string.IsNullOrWhiteSpace( animationDirectory ) )
+			animationDirectory = baseCast is not null ? Path.GetDirectoryName( baseCast.AbsolutePath ) : Project.Current?.GetAssetsPath();
+
+		if ( string.IsNullOrWhiteSpace( animationDirectory ) )
+			return string.Empty;
+
+		return Path.Combine( animationDirectory, $"{Path.GetFileName( animationDirectory )}.rigset" );
 	}
 }

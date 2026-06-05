@@ -368,6 +368,7 @@ public partial class AssetList
 			return;
 
 		e.Menu.AddOption( "Create Animated Model..", "movie", () => _ = new CreateAnimatedModelFromCastDialog( castFiles ) );
+		e.Menu.AddOption( "Create Animation Rigset..", "animation", () => _ = new CreateAnimationRigsetFromCastDialog( castFiles ) );
 	}
 
 	static void RebuildTagMenu( Menu tag_menu, List<AssetEntry> entries )
@@ -724,6 +725,18 @@ public partial class AssetList
 			e.Menu.AddOption( $"Recursively Rebuild {assetCount} Icons", "collections", () => BuildAllIconsR( assets ) );
 			e.Menu.AddOption( $"Recursively Recompile {assetCount} Assets", "restart_alt", () => RecompileAllAssetsR( assets ) );
 		}
+	}
+
+	[Event( "folder.contextmenu", Priority = 76 )]
+	private static void OnFolderContextMenu_CastRigset( FolderContextMenu e )
+	{
+		if ( e.Target is null || !e.Target.Exists )
+			return;
+
+		if ( !Directory.GetFiles( e.Target.FullName, "*.cast", SearchOption.TopDirectoryOnly ).Any() )
+			return;
+
+		e.Menu.AddOption( "Create Animation Rigset..", "animation", () => _ = new CreateAnimationRigsetFromCastDialog( e.Target ) );
 	}
 
 	[Event( "folder.contextmenu", Priority = 100 )]
