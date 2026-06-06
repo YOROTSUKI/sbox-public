@@ -406,7 +406,101 @@ public class CastAnimationImportTests
 	}
 
 	[TestMethod]
-	public void StrictAdvancedFailsWhenAdvancedDataCannotBePreserved()
+	public void DmxMeshTextUsesFaceVertexNormalAndUvStreams()
+	{
+		var skeleton = CreateTwoBoneSkeleton();
+		Assert.IsTrue( Editor.EditorUtility.TryCreateCastSkeletonData( skeleton, out var skeletonData ) );
+		var sourceData = new Editor.EditorUtility.CastSourceData
+		{
+			Name = "seams",
+			Skeleton = skeletonData,
+			Meshes = [CreateFaceVertexSeamMesh()]
+		};
+
+		var dmx = Editor.EditorUtility.CreateBaseCastDmxTextForTests( sourceData );
+
+		CollectionAssert.AreEqual(
+			new[] { "0", "1", "2", "0", "2", "3" },
+			GetDmxArrayValues( dmx, "position$0Indices" ) );
+		CollectionAssert.AreEqual(
+			new[] { "0 0 1", "0 0 1", "0 0 1", "1 0 0", "1 0 0", "1 0 0" },
+			GetDmxArrayValues( dmx, "normal$0" ) );
+		CollectionAssert.AreEqual(
+			new[] { "0", "1", "2", "3", "4", "5" },
+			GetDmxArrayValues( dmx, "normal$0Indices" ) );
+		CollectionAssert.AreEqual(
+			new[] { "0 0", "1 0", "1 1", "0.25 0.25", "0.75 0.75", "0 1" },
+			GetDmxArrayValues( dmx, "texcoord$0" ) );
+		CollectionAssert.AreEqual(
+			new[] { "0", "1", "2", "3", "4", "5" },
+			GetDmxArrayValues( dmx, "texcoord$0Indices" ) );
+	}
+
+	[TestMethod]
+	public void BasicOnlyModelImportSelectsSmd()
+	{
+		var skeleton = CreateTwoBoneSkeleton();
+		Assert.IsTrue( Editor.EditorUtility.TryCreateCastSkeletonData( skeleton, out var skeletonData ) );
+
+		var sourceData = new Editor.EditorUtility.CastSourceData { Name = "basic", Skeleton = skeletonData };
+		var context = new Editor.EditorUtility.CastImportContext( "basic.cast" );
+
+		Assert.IsTrue( Editor.EditorUtility.TrySelectCastModelSourceWriter( sourceData, [], Editor.CastAnimatedModelImportOptions.BasicOnly, context, out var writer ) );
+		Assert.AreEqual( "SMD", writer.Name );
+	}
+
+	[TestMethod]
+	public void BasicOnlyModelImportWithScaleKeysSelectsSmd()
+	{
+		var skeleton = CreateTwoBoneSkeleton();
+		Assert.IsTrue( Editor.EditorUtility.TryCreateCastSkeletonData( skeleton, out var skeletonData ) );
+
+		var animation = new Editor.EditorUtility.CastAnimationData
+		{
+			Name = "scale",
+			HasScaleKeys = true,
+			Frames = [new Editor.EditorUtility.CastAnimationFrameData { BoneTransforms = skeletonData.Bones.Select( x => x.LocalTransform ).ToArray() }]
+		};
+		var sourceData = new Editor.EditorUtility.CastSourceData { Name = "basic", Skeleton = skeletonData };
+		var context = new Editor.EditorUtility.CastImportContext( "basic.cast" );
+		var options = new Editor.CastAnimatedModelImportOptions
+		{
+			AdvancedDataMode = Editor.CastAdvancedDataMode.BasicOnly,
+			RootMotionMode = Editor.CastRootMotionMode.None
+		};
+
+		Assert.IsTrue( Editor.EditorUtility.TrySelectCastModelSourceWriter( sourceData, [animation], options, context, out var writer ) );
+		Assert.AreEqual( "SMD", writer.Name );
+		Assert.AreEqual( 0, context.Warnings.Count );
+	}
+
+	[TestMethod]
+	public void AdvancedWhenSupportedAllowsScaleWithDmxWriter()
+	{
+		var skeleton = CreateTwoBoneSkeleton();
+		Assert.IsTrue( Editor.EditorUtility.TryCreateCastSkeletonData( skeleton, out var skeletonData ) );
+
+		var animation = new Editor.EditorUtility.CastAnimationData
+		{
+			Name = "scale",
+			HasScaleKeys = true,
+			Frames = [new Editor.EditorUtility.CastAnimationFrameData { BoneTransforms = skeletonData.Bones.Select( x => x.LocalTransform ).ToArray() }]
+		};
+		var sourceData = new Editor.EditorUtility.CastSourceData { Name = "advanced", Skeleton = skeletonData };
+		var context = new Editor.EditorUtility.CastImportContext( "advanced.cast" );
+		var options = new Editor.CastAnimatedModelImportOptions
+		{
+			AdvancedDataMode = Editor.CastAdvancedDataMode.AdvancedWhenSupported,
+			RootMotionMode = Editor.CastRootMotionMode.None
+		};
+
+		Assert.IsTrue( Editor.EditorUtility.TrySelectCastModelSourceWriter( sourceData, [animation], options, context, out var writer ) );
+		Assert.AreEqual( "DMX", writer.Name );
+		Assert.AreEqual( 0, context.Warnings.Count );
+	}
+
+	[TestMethod]
+	public void StrictAdvancedAllowsScaleWithDmxWriter()
 	{
 		var skeleton = CreateTwoBoneSkeleton();
 		Assert.IsTrue( Editor.EditorUtility.TryCreateCastSkeletonData( skeleton, out var skeletonData ) );
@@ -425,12 +519,145 @@ public class CastAnimationImportTests
 			RootMotionMode = Editor.CastRootMotionMode.None
 		};
 
+		Assert.IsTrue( Editor.EditorUtility.TrySelectCastModelSourceWriter( sourceData, [animation], options, context, out var writer ) );
+		Assert.AreEqual( "DMX", writer.Name );
+		Assert.AreEqual( 0, context.Warnings.Count );
+	}
+
+	[TestMethod]
+	public void AdvancedWhenSupportedDoesNotFallBackWhenBlendShapesCannotBePreserved()
+	{
+		var skeleton = CreateTwoBoneSkeleton();
+		Assert.IsTrue( Editor.EditorUtility.TryCreateCastSkeletonData( skeleton, out var skeletonData ) );
+
+		var sourceData = CreateBlendShapeSourceData( skeletonData );
+		var context = new Editor.EditorUtility.CastImportContext( "advanced.cast" );
+		var options = new Editor.CastAnimatedModelImportOptions
+		{
+			AdvancedDataMode = Editor.CastAdvancedDataMode.AdvancedWhenSupported,
+			RootMotionMode = Editor.CastRootMotionMode.None
+		};
+
+		Assert.IsFalse( Editor.EditorUtility.TrySelectCastModelSourceWriter( sourceData, [], options, context, out _ ) );
+		Assert.IsTrue( context.Warnings.Any( x => x.Contains( "cannot be preserved", StringComparison.OrdinalIgnoreCase ) ) );
+	}
+
+	[TestMethod]
+	public void StrictAdvancedFailsWhenBlendShapesCannotBePreserved()
+	{
+		var skeleton = CreateTwoBoneSkeleton();
+		Assert.IsTrue( Editor.EditorUtility.TryCreateCastSkeletonData( skeleton, out var skeletonData ) );
+
+		var sourceData = CreateBlendShapeSourceData( skeletonData );
+		var context = new Editor.EditorUtility.CastImportContext( "strict.cast" );
+		var options = new Editor.CastAnimatedModelImportOptions
+		{
+			AdvancedDataMode = Editor.CastAdvancedDataMode.StrictAdvanced,
+			RootMotionMode = Editor.CastRootMotionMode.None
+		};
+
+		Assert.IsFalse( Editor.EditorUtility.TrySelectCastModelSourceWriter( sourceData, [], options, context, out _ ) );
+		Assert.IsTrue( context.Warnings.Any( x => x.Contains( "cannot be preserved", StringComparison.OrdinalIgnoreCase ) ) );
+	}
+
+	[TestMethod]
+	public void StrictAdvancedFailsWhenNotificationEventsCannotBePreserved()
+	{
+		var skeleton = CreateTwoBoneSkeleton();
+		Assert.IsTrue( Editor.EditorUtility.TryCreateCastSkeletonData( skeleton, out var skeletonData ) );
+
+		var animation = new Editor.EditorUtility.CastAnimationData
+		{
+			Name = "events",
+			Events = [new Editor.EditorUtility.CastAnimationEventData( "step", 1 )],
+			Frames = [new Editor.EditorUtility.CastAnimationFrameData { BoneTransforms = skeletonData.Bones.Select( x => x.LocalTransform ).ToArray() }]
+		};
+		var sourceData = new Editor.EditorUtility.CastSourceData { Name = "strict", Skeleton = skeletonData };
+		var context = new Editor.EditorUtility.CastImportContext( "strict.cast" );
+		var options = new Editor.CastAnimatedModelImportOptions
+		{
+			AdvancedDataMode = Editor.CastAdvancedDataMode.StrictAdvanced,
+			RootMotionMode = Editor.CastRootMotionMode.None
+		};
+
 		Assert.IsFalse( Editor.EditorUtility.TrySelectCastModelSourceWriter( sourceData, [animation], options, context, out _ ) );
 		Assert.IsTrue( context.Warnings.Any( x => x.Contains( "cannot be preserved", StringComparison.OrdinalIgnoreCase ) ) );
 	}
 
 	[TestMethod]
-	public void SmdModelDocKeepsScaleDisabled()
+	public void StrictAdvancedFailsWhenRootMotionCannotBePreserved()
+	{
+		var skeleton = CreateTwoBoneSkeleton();
+		Assert.IsTrue( Editor.EditorUtility.TryCreateCastSkeletonData( skeleton, out var skeletonData ) );
+
+		var animation = new Editor.EditorUtility.CastAnimationData
+		{
+			Name = "root_motion",
+			RootMotion = new Editor.EditorUtility.CastRootMotionData( "root", 0 ),
+			Frames = [new Editor.EditorUtility.CastAnimationFrameData { BoneTransforms = skeletonData.Bones.Select( x => x.LocalTransform ).ToArray() }]
+		};
+		var sourceData = new Editor.EditorUtility.CastSourceData { Name = "strict", Skeleton = skeletonData };
+		var context = new Editor.EditorUtility.CastImportContext( "strict.cast" );
+		var options = new Editor.CastAnimatedModelImportOptions
+		{
+			AdvancedDataMode = Editor.CastAdvancedDataMode.StrictAdvanced,
+			RootMotionMode = Editor.CastRootMotionMode.Bone,
+			RootMotionBoneName = "root"
+		};
+
+		Assert.IsFalse( Editor.EditorUtility.TrySelectCastModelSourceWriter( sourceData, [animation], options, context, out _ ) );
+		Assert.IsTrue( context.Warnings.Any( x => x.Contains( "cannot be preserved", StringComparison.OrdinalIgnoreCase ) ) );
+	}
+
+	[TestMethod]
+	public void DmxModelDocEnablesScaleForScaleAnimations()
+	{
+		var skeleton = CreateTwoBoneSkeleton();
+		Assert.IsTrue( Editor.EditorUtility.TryCreateCastSkeletonData( skeleton, out var skeletonData ) );
+
+		var animation = new Editor.EditorUtility.CastAnimationData
+		{
+			Name = "scale",
+			HasScaleKeys = true,
+			Frames = [new Editor.EditorUtility.CastAnimationFrameData { BoneTransforms = skeletonData.Bones.Select( x => x.LocalTransform ).ToArray() }]
+		};
+		var sourceData = new Editor.EditorUtility.CastSourceData { Name = "dmx", Skeleton = skeletonData };
+
+		var modelDoc = Editor.EditorUtility.CreateCastDmxModelDocTextForTests( sourceData, [animation] );
+		StringAssert.Contains( modelDoc, "filename = \"model.dmx\"" );
+		StringAssert.Contains( modelDoc, "source_filename = \"scale.dmx\"" );
+		StringAssert.Contains( modelDoc, "enable_scale = true" );
+	}
+
+	[TestMethod]
+	public void DmxAnimationTextContainsScaleChannelValues()
+	{
+		var skeleton = CreateTwoBoneSkeleton();
+		Assert.IsTrue( Editor.EditorUtility.TryCreateCastSkeletonData( skeleton, out var skeletonData ) );
+
+		var frameTransforms = skeletonData.Bones.Select( x => x.LocalTransform ).ToArray();
+		frameTransforms[0].Scale = new Vector3( 2, 3, 4 );
+		var animation = new Editor.EditorUtility.CastAnimationData
+		{
+			Name = "scale",
+			HasScaleKeys = true,
+			FrameRate = 30.0f,
+			Frames = [new Editor.EditorUtility.CastAnimationFrameData { BoneTransforms = frameTransforms }]
+		};
+
+		var dmx = Editor.EditorUtility.CreateAnimationCastDmxTextForTests( skeletonData, animation );
+		StringAssert.Contains( dmx, "<!-- dmx encoding keyvalues2 4 format model 22 -->" );
+		StringAssert.Contains( dmx, "\"toAttribute\" \"string\" \"scale\"" );
+		StringAssert.Contains( dmx, "\"2 3 4\"" );
+		Assert.IsFalse( dmx.Contains( "\"compressed\"", StringComparison.OrdinalIgnoreCase ) );
+
+		var timeFrameIndex = dmx.IndexOf( "\"timeFrame\"", StringComparison.Ordinal );
+		Assert.IsTrue( timeFrameIndex > 0 );
+		Assert.IsFalse( dmx[..timeFrameIndex].TrimEnd().EndsWith( "},", StringComparison.Ordinal ) );
+	}
+
+	[TestMethod]
+	public void BasicOnlyModelDocKeepsScaleDisabled()
 	{
 		var skeleton = CreateTwoBoneSkeleton();
 		Assert.IsTrue( Editor.EditorUtility.TryCreateCastSkeletonData( skeleton, out var skeletonData ) );
@@ -528,6 +755,97 @@ public class CastAnimationImportTests
 
 		cast.AddNode( model );
 		return cast;
+	}
+
+	static Editor.EditorUtility.CastMeshData CreateFaceVertexSeamMesh()
+	{
+		return new Editor.EditorUtility.CastMeshData
+		{
+			SourceHash = 0x2001,
+			Name = "seams",
+			MaterialName = "materials/dev/primary_white.vmat",
+			Positions =
+			[
+				new( 0, 0, 0 ),
+				new( 1, 0, 0 ),
+				new( 1, 1, 0 ),
+				new( 0, 1, 0 )
+			],
+			Faces =
+			[
+				new Editor.EditorUtility.CastTriangle( 0, 1, 2 ),
+				new Editor.EditorUtility.CastTriangle( 0, 2, 3 )
+			],
+			Normals =
+			[
+				new( 0, 0, 1 ),
+				new( 0, 0, 1 ),
+				new( 0, 0, 1 ),
+				new( 0, 0, 1 )
+			],
+			TexCoords =
+			[
+				new( 0, 0 ),
+				new( 1, 0 ),
+				new( 1, 1 ),
+				new( 0, 1 )
+			],
+			FaceVertexNormals =
+			[
+				new( 0, 0, 1 ),
+				new( 0, 0, 1 ),
+				new( 0, 0, 1 ),
+				new( 1, 0, 0 ),
+				new( 1, 0, 0 ),
+				new( 1, 0, 0 )
+			],
+			FaceVertexTexCoords =
+			[
+				new( 0, 0 ),
+				new( 1, 0 ),
+				new( 1, 1 ),
+				new( 0.25f, 0.25f ),
+				new( 0.75f, 0.75f ),
+				new( 0, 1 )
+			]
+		};
+	}
+
+	static Editor.EditorUtility.CastSourceData CreateBlendShapeSourceData( Editor.EditorUtility.CastSkeletonData skeletonData )
+	{
+		return new Editor.EditorUtility.CastSourceData
+		{
+			Name = "blend",
+			Skeleton = skeletonData,
+			BlendShapes =
+			[
+				new Editor.EditorUtility.CastBlendShapeData
+				{
+					Name = "smile",
+					VertexDeltas = [new Editor.EditorUtility.CastBlendShapeVertexDelta( 0, Vector3.Up )]
+				}
+			]
+		};
+	}
+
+	static string[] GetDmxArrayValues( string dmx, string name )
+	{
+		var header = $"\"{name}\" ";
+		var headerIndex = dmx.IndexOf( header, StringComparison.Ordinal );
+		Assert.IsTrue( headerIndex >= 0, $"Missing DMX array \"{name}\"." );
+
+		var startIndex = dmx.IndexOf( '[', headerIndex );
+		Assert.IsTrue( startIndex >= 0, $"Missing DMX array start for \"{name}\"." );
+
+		var endIndex = dmx.IndexOf( ']', startIndex );
+		Assert.IsTrue( endIndex >= 0, $"Missing DMX array end for \"{name}\"." );
+
+		return dmx[(startIndex + 1)..endIndex]
+			.Split( ['\r', '\n'], StringSplitOptions.RemoveEmptyEntries )
+			.Select( x => x.Trim().TrimEnd( ',' ) )
+			.Where( x => x.Length >= 2 && x[0] == '"' && x[^1] == '"' )
+			.Select( x => x[1..^1] )
+			.ToArray();
 	}
 
 	static AnimationNode CreateTranslationAnimation( string boneName, float value )

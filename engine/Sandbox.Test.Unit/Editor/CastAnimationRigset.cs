@@ -59,7 +59,104 @@ public class CastAnimationRigsetTests
 	{
 		var animation = new Editor.EditorUtility.CastAnimationData { Name = "walk run" };
 
-		Assert.AreEqual( "walk_run.smd", Editor.EditorUtility.CreateRigsetAnimationSidecarFileName( animation ) );
+		Assert.AreEqual( "walk_run.dmx", Editor.EditorUtility.CreateRigsetAnimationSidecarFileName( animation ) );
+	}
+
+	[TestMethod]
+	public void RigsetDefaultSidecarFormatIsDmx()
+	{
+		Assert.AreEqual( "dmx", new Sandbox.AnimationRigset().SidecarFormat );
+	}
+
+	[TestMethod]
+	public void BasicOnlyRigsetSidecarFormatIsSmd()
+	{
+		Assert.IsTrue( Editor.EditorUtility.TryCreateCastSkeletonData( CreateTwoBoneSkeleton(), out var skeleton ) );
+		var sourceData = new Editor.EditorUtility.CastSourceData { Name = "basic", Skeleton = skeleton };
+		var animation = CreateScaleAnimation( skeleton );
+		var context = new Editor.EditorUtility.CastImportContext( "basic.rigset" );
+		var options = new Editor.CastAnimatedModelImportOptions
+		{
+			AdvancedDataMode = Editor.CastAdvancedDataMode.BasicOnly,
+			RootMotionMode = Editor.CastRootMotionMode.None
+		};
+
+		Assert.IsTrue( Editor.EditorUtility.TrySelectRigsetSidecarFormat( sourceData, [animation], options, context, out var sidecarFormat ) );
+		Assert.AreEqual( "smd", sidecarFormat );
+		Assert.AreEqual( 0, context.Warnings.Count );
+	}
+
+	[TestMethod]
+	public void AdvancedRigsetSidecarFormatIsDmxWhenSupported()
+	{
+		Assert.IsTrue( Editor.EditorUtility.TryCreateCastSkeletonData( CreateTwoBoneSkeleton(), out var skeleton ) );
+		var sourceData = new Editor.EditorUtility.CastSourceData { Name = "advanced", Skeleton = skeleton };
+		var animation = CreateScaleAnimation( skeleton );
+		var context = new Editor.EditorUtility.CastImportContext( "advanced.rigset" );
+		var options = new Editor.CastAnimatedModelImportOptions
+		{
+			AdvancedDataMode = Editor.CastAdvancedDataMode.AdvancedWhenSupported,
+			RootMotionMode = Editor.CastRootMotionMode.None
+		};
+
+		Assert.IsTrue( Editor.EditorUtility.TrySelectRigsetSidecarFormat( sourceData, [animation], options, context, out var sidecarFormat ) );
+		Assert.AreEqual( "dmx", sidecarFormat );
+		Assert.AreEqual( 0, context.Warnings.Count );
+	}
+
+	[TestMethod]
+	public void AdvancedRigsetSidecarFormatDoesNotFallBackForUnsupportedEvents()
+	{
+		Assert.IsTrue( Editor.EditorUtility.TryCreateCastSkeletonData( CreateTwoBoneSkeleton(), out var skeleton ) );
+		var sourceData = new Editor.EditorUtility.CastSourceData { Name = "advanced", Skeleton = skeleton };
+		var animation = CreateEventAnimation( skeleton );
+		var context = new Editor.EditorUtility.CastImportContext( "advanced.rigset" );
+		var options = new Editor.CastAnimatedModelImportOptions
+		{
+			AdvancedDataMode = Editor.CastAdvancedDataMode.AdvancedWhenSupported,
+			RootMotionMode = Editor.CastRootMotionMode.None
+		};
+
+		Assert.IsFalse( Editor.EditorUtility.TrySelectRigsetSidecarFormat( sourceData, [animation], options, context, out _ ) );
+		Assert.IsTrue( context.Warnings.Any( x => x.Contains( "cannot be preserved", StringComparison.OrdinalIgnoreCase ) ) );
+	}
+
+	[TestMethod]
+	public void StrictRigsetSidecarWriteFailsForUnsupportedEvents()
+	{
+		using var temp = new TempRigsetDirectory();
+		Assert.IsTrue( Editor.EditorUtility.TryCreateCastSkeletonData( CreateTwoBoneSkeleton(), out var skeleton ) );
+		var animation = CreateEventAnimation( skeleton );
+		var context = new Editor.EditorUtility.CastImportContext( temp.RigsetPath );
+		var options = new Editor.CastAnimatedModelImportOptions
+		{
+			AdvancedDataMode = Editor.CastAdvancedDataMode.StrictAdvanced,
+			RootMotionMode = Editor.CastRootMotionMode.None
+		};
+
+		Assert.IsFalse( Editor.EditorUtility.TryWriteRigsetSidecarFiles( temp.RigsetPath, skeleton, [animation], context, out _, options ) );
+		Assert.IsTrue( context.Warnings.Any( x => x.Contains( "cannot be preserved", StringComparison.OrdinalIgnoreCase ) ) );
+	}
+
+	[TestMethod]
+	public void IncompatibleRigsetStillAppendsAnimationReferences()
+	{
+		using var temp = new TempRigsetDirectory();
+		Assert.IsTrue( Editor.EditorUtility.TryCreateCastSkeletonData( CreateTwoBoneSkeleton(), out var modelSkeleton ) );
+		Assert.IsTrue( Editor.EditorUtility.TryCreateCastSkeletonData( CreateTwoBoneSkeleton( childName: "other_child" ), out var rigsetSkeleton ) );
+		var rigset = temp.CreateRigset( rigsetSkeleton, "idle" );
+		var context = new Editor.EditorUtility.CastImportContext( temp.RigsetPath );
+		var generated = new List<Editor.EditorUtility.CastGeneratedAnimationFile>();
+		var references = new[]
+		{
+			new Editor.EditorUtility.RigsetReferenceData { Path = temp.RigsetPath, Rigset = rigset }
+		};
+
+		Assert.IsTrue( Editor.EditorUtility.TryAppendRigsetAnimations( modelSkeleton, references, generated, context ) );
+		Assert.AreEqual( 1, generated.Count );
+		Assert.AreEqual( "idle", generated[0].Animation.Name );
+		Assert.AreEqual( temp.SidecarRelativePath, generated[0].RelativePath );
+		Assert.IsTrue( context.Warnings.Any( x => x.Contains( "not compatible", StringComparison.OrdinalIgnoreCase ) ) );
 	}
 
 	[TestMethod]
@@ -92,7 +189,7 @@ public class CastAnimationRigsetTests
 		{
 			new(
 				new Editor.EditorUtility.CastAnimationData { Name = "idle" },
-				"local.smd" )
+				"local.dmx" )
 		};
 		var references = new[]
 		{
@@ -143,6 +240,26 @@ public class CastAnimationRigsetTests
 		return skeleton;
 	}
 
+	static Editor.EditorUtility.CastAnimationData CreateEventAnimation( Editor.EditorUtility.CastSkeletonData skeleton )
+	{
+		return new Editor.EditorUtility.CastAnimationData
+		{
+			Name = "events",
+			Events = [new Editor.EditorUtility.CastAnimationEventData( "step", 1 )],
+			Frames = [new Editor.EditorUtility.CastAnimationFrameData { BoneTransforms = skeleton.Bones.Select( x => x.LocalTransform ).ToArray() }]
+		};
+	}
+
+	static Editor.EditorUtility.CastAnimationData CreateScaleAnimation( Editor.EditorUtility.CastSkeletonData skeleton )
+	{
+		return new Editor.EditorUtility.CastAnimationData
+		{
+			Name = "scale",
+			HasScaleKeys = true,
+			Frames = [new Editor.EditorUtility.CastAnimationFrameData { BoneTransforms = skeleton.Bones.Select( x => x.LocalTransform ).ToArray() }]
+		};
+	}
+
 	sealed class TempRigsetDirectory : IDisposable
 	{
 		public TempRigsetDirectory()
@@ -158,12 +275,13 @@ public class CastAnimationRigsetTests
 
 		public Sandbox.AnimationRigset CreateRigset( Editor.EditorUtility.CastSkeletonData skeleton, string animationName )
 		{
-			var sidecarPath = Path.Combine( Root, $"{animationName}.smd" );
-			File.WriteAllText( sidecarPath, "version 1\n" );
+			var sidecarPath = Path.Combine( Root, $"{animationName}.dmx" );
+			File.WriteAllText( sidecarPath, "<!-- dmx encoding keyvalues2 4 format model 22 -->\n" );
 			SidecarRelativePath = sidecarPath.Replace( '\\', '/' );
 
 			return new Sandbox.AnimationRigset
 			{
+				SidecarFormat = "dmx",
 				SkeletonSignature = Editor.EditorUtility.CreateAnimationRigsetSkeletonSignature( skeleton ),
 				Animations =
 				[

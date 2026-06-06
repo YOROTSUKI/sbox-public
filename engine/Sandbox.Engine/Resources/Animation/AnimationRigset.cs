@@ -26,6 +26,7 @@ public sealed class AnimationRigset : GameResource
 	public string AdvancedDataMode { get; set; } = "BasicOnly";
 	public string RootMotionMode { get; set; } = "Auto";
 	public string RootMotionBoneName { get; set; } = string.Empty;
+	public string SidecarFormat { get; set; } = "dmx";
 
 	public AnimationRigsetSkeletonSignature SkeletonSignature { get; set; } = new();
 

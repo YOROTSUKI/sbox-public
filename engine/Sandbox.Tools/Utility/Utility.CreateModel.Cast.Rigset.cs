@@ -11,7 +11,7 @@ namespace Editor;
 public static partial class EditorUtility
 {
 	// Architecture note: rigsets are managed animation indexes, not native animation
-	// libraries. The compiler owns deterministic SMD sidecars under
+	// libraries. The compiler owns deterministic animation sidecars under
 	// "<name>.rigsetimport", and compatible models merge those sidecars into their
 	// ModelDoc AnimationList entries after skeleton validation.
 	internal sealed class RigsetReferenceData
@@ -151,7 +151,10 @@ public static partial class EditorUtility
 			return false;
 		}
 
-		var exportedAnimations = CreateExpectedRigsetAnimationFiles( importData.SourceData.Skeleton, importData.Animations, sidecarDirectory, context );
+		if ( !TrySelectRigsetSidecarFormat( importData.SourceData, importData.Animations, options, context, out var sidecarFormat ) )
+			return false;
+
+		var exportedAnimations = CreateExpectedRigsetAnimationFiles( importData.SourceData.Skeleton, importData.Animations, sidecarDirectory, context, sidecarFormat );
 		if ( exportedAnimations is null )
 			return false;
 
@@ -239,6 +242,7 @@ public static partial class EditorUtility
 			AdvancedDataMode = (options ?? CastAnimatedModelImportOptions.BasicOnly).AdvancedDataMode.ToString(),
 			RootMotionMode = (options ?? CastAnimatedModelImportOptions.BasicOnly).RootMotionMode.ToString(),
 			RootMotionBoneName = (options ?? CastAnimatedModelImportOptions.BasicOnly).RootMotionBoneName ?? string.Empty,
+			SidecarFormat = GetAnimationRigsetSidecarFormat( exportedAnimations ),
 			SkeletonSignature = CreateAnimationRigsetSkeletonSignature( skeletonData ),
 			Animations = rigsetAnimations,
 			Warnings = context.Warnings.ToList()
@@ -252,9 +256,11 @@ public static partial class EditorUtility
 		CastSkeletonData skeletonData,
 		IReadOnlyList<CastAnimationData> animations,
 		CastImportContext context,
-		out List<CastGeneratedAnimationFile> exportedAnimations )
+		out List<CastGeneratedAnimationFile> exportedAnimations,
+		CastAnimatedModelImportOptions options = null )
 	{
 		exportedAnimations = null;
+		options ??= CastAnimatedModelImportOptions.BasicOnly;
 
 		var targetDirectory = Path.GetDirectoryName( rigsetAbsolutePath );
 		if ( string.IsNullOrWhiteSpace( targetDirectory ) )
@@ -273,23 +279,29 @@ public static partial class EditorUtility
 		if ( !TryPrepareCastSidecarDirectory( targetDirectory, sidecarDirectory, context ) )
 			return false;
 
-		WarnIfCastScaleIsIgnored(
-			new CastSourceData
-			{
-				Name = Path.GetFileNameWithoutExtension( rigsetAbsolutePath ),
-				Skeleton = skeletonData
-			},
-			animations,
-			context );
+		var sourceData = new CastSourceData
+		{
+			Name = Path.GetFileNameWithoutExtension( rigsetAbsolutePath ),
+			Skeleton = skeletonData
+		};
 
-		exportedAnimations = CreateExpectedRigsetAnimationFiles( skeletonData, animations, sidecarDirectory, context );
+		if ( !TrySelectRigsetSidecarFormat( sourceData, animations, options, context, out var sidecarFormat ) )
+			return false;
+
+		if ( string.Equals( sidecarFormat, "smd", StringComparison.OrdinalIgnoreCase ) )
+			WarnIfCastScaleIsIgnored( sourceData, animations, context );
+
+		exportedAnimations = CreateExpectedRigsetAnimationFiles( skeletonData, animations, sidecarDirectory, context, sidecarFormat );
 		if ( exportedAnimations is null )
 			return false;
 
 		foreach ( var exportedAnimation in exportedAnimations )
 		{
-			var animationAbsolutePath = Path.Combine( sidecarDirectory, CreateRigsetAnimationSidecarFileName( exportedAnimation.Animation ) );
-			File.WriteAllText( animationAbsolutePath, CreateAnimationCastSmdText( skeletonData, exportedAnimation.Animation ), Utf8WithoutBom );
+			var animationAbsolutePath = Path.Combine( sidecarDirectory, CreateRigsetAnimationSidecarFileName( exportedAnimation.Animation, sidecarFormat ) );
+			var sidecarText = string.Equals( sidecarFormat, "dmx", StringComparison.OrdinalIgnoreCase )
+				? CreateAnimationCastDmxText( skeletonData, exportedAnimation.Animation )
+				: CreateAnimationCastSmdText( skeletonData, exportedAnimation.Animation );
+			File.WriteAllText( animationAbsolutePath, sidecarText, Utf8WithoutBom );
 		}
 
 		return true;
@@ -324,8 +336,7 @@ public static partial class EditorUtility
 
 			if ( !IsAnimationRigsetSkeletonCompatible( rigsetReference.Rigset.SkeletonSignature, modelSkeleton, out var reason ) )
 			{
-				context.Warn( $"Rigset \"{rigsetReference.Path}\" is not compatible with the model skeleton: {reason}" );
-				return false;
+				context.Warn( $"Rigset \"{rigsetReference.Path}\" is not compatible with the model skeleton: {reason} Animation references will still be added." );
 			}
 
 			foreach ( var rigsetAnimation in rigsetReference.Rigset.Animations ?? [] )
@@ -440,7 +451,8 @@ public static partial class EditorUtility
 		CastSkeletonData skeletonData,
 		IReadOnlyList<CastAnimationData> animations,
 		string sidecarDirectory,
-		CastImportContext context )
+		CastImportContext context,
+		string sidecarFormat = "dmx" )
 	{
 		var exportedAnimations = new List<CastGeneratedAnimationFile>();
 		foreach ( var animation in animations ?? [] )
@@ -448,7 +460,7 @@ public static partial class EditorUtility
 			if ( animation is null || animation.Frames.Length == 0 )
 				continue;
 
-			var animationAbsolutePath = Path.Combine( sidecarDirectory, CreateRigsetAnimationSidecarFileName( animation ) );
+			var animationAbsolutePath = Path.Combine( sidecarDirectory, CreateRigsetAnimationSidecarFileName( animation, sidecarFormat ) );
 			if ( !TryGetAssetRelativePath( animationAbsolutePath, context, out var animationRelativePath ) )
 				return null;
 
@@ -458,10 +470,47 @@ public static partial class EditorUtility
 		return exportedAnimations;
 	}
 
-	internal static string CreateRigsetAnimationSidecarFileName( CastAnimationData animation )
+	internal static bool TrySelectRigsetSidecarFormat(
+		CastSourceData sourceData,
+		IReadOnlyList<CastAnimationData> animations,
+		CastAnimatedModelImportOptions options,
+		CastImportContext context,
+		out string sidecarFormat )
+	{
+		options ??= CastAnimatedModelImportOptions.BasicOnly;
+
+		if ( options.AdvancedDataMode == CastAdvancedDataMode.BasicOnly )
+		{
+			sidecarFormat = "smd";
+			return true;
+		}
+
+		sidecarFormat = "dmx";
+
+		var dmxWriter = new DmxCastModelSourceWriter();
+		if ( dmxWriter.CanWriteAdvancedData( sourceData, animations, options, out _ ) )
+			return true;
+
+		dmxWriter.CanWriteAdvancedData( sourceData, animations, options, out var reason );
+		WarnIfCastAdvancedDataIsNotPreserved( sourceData, animations, reason, context );
+		return false;
+	}
+
+	static string GetAnimationRigsetSidecarFormat( IReadOnlyList<CastGeneratedAnimationFile> exportedAnimations )
+	{
+		if ( exportedAnimations is null || exportedAnimations.Count == 0 )
+			return "dmx";
+
+		return string.Equals( Path.GetExtension( exportedAnimations[0].RelativePath ), ".smd", StringComparison.OrdinalIgnoreCase )
+			? "smd"
+			: "dmx";
+	}
+
+	internal static string CreateRigsetAnimationSidecarFileName( CastAnimationData animation, string sidecarFormat = "dmx" )
 	{
 		var animationName = animation?.Name ?? "animation";
-		return $"{SanitizeCastFileName( animationName )}.smd";
+		var extension = string.Equals( sidecarFormat, "smd", StringComparison.OrdinalIgnoreCase ) ? "smd" : "dmx";
+		return $"{SanitizeCastFileName( animationName )}.{extension}";
 	}
 
 	internal static AnimationRigsetSkeletonSignature CreateAnimationRigsetSkeletonSignature( CastSkeletonData skeletonData )
@@ -709,7 +758,7 @@ public sealed class AnimationRigsetCompiler : ResourceCompiler
 			if ( !EditorUtility.TryCollectCastAnimatedImportData( baseCastPath, animationPaths, options, context, out var importData ) )
 				return Task.FromResult( false );
 
-			if ( !EditorUtility.TryWriteRigsetSidecarFiles( Context.AbsolutePath, importData.SourceData.Skeleton, importData.Animations, context, out var exportedAnimations ) )
+			if ( !EditorUtility.TryWriteRigsetSidecarFiles( Context.AbsolutePath, importData.SourceData.Skeleton, importData.Animations, context, out var exportedAnimations, options ) )
 				return Task.FromResult( false );
 
 			if ( !EditorUtility.TryCreateAnimationRigsetData(

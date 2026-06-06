@@ -3,6 +3,7 @@ using System.Globalization;
 using System.IO;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using Cast.NET;
 using Cast.NET.Nodes;
@@ -1215,28 +1216,26 @@ public static partial class EditorUtility
 		CastImportContext context,
 		out ICastModelSourceWriter writer )
 	{
-		writer = new SmdCastModelSourceWriter();
+		options ??= CastAnimatedModelImportOptions.BasicOnly;
 
-		if ( options is null || options.AdvancedDataMode == CastAdvancedDataMode.BasicOnly )
+		if ( options.AdvancedDataMode == CastAdvancedDataMode.BasicOnly )
+		{
+			writer = new SmdCastModelSourceWriter();
+			return true;
+		}
+
+		var dmxWriter = new DmxCastModelSourceWriter();
+		writer = dmxWriter;
+
+		if ( dmxWriter.CanWriteAdvancedData( sourceData, animations, options, out _ ) )
 			return true;
 
 		if ( !HasCastAdvancedData( sourceData, animations ) )
 			return true;
 
-		var dmxWriter = new DmxCastModelSourceWriter();
-		if ( dmxWriter.CanWriteAdvancedData( sourceData, animations, options, out _ ) )
-		{
-			writer = dmxWriter;
-			return true;
-		}
-
 		dmxWriter.CanWriteAdvancedData( sourceData, animations, options, out var reason );
 		WarnIfCastAdvancedDataIsNotPreserved( sourceData, animations, reason, context );
-
-		if ( options.AdvancedDataMode == CastAdvancedDataMode.StrictAdvanced )
-			return false;
-
-		return true;
+		return false;
 	}
 
 	static bool TryWriteSmdCastModel(
@@ -1319,6 +1318,94 @@ public static partial class EditorUtility
 			File.WriteAllText(
 				targetAbsolutePath,
 				CreateCastModelDocText( sourceData, baseSmdRelativePath, generatedMaterials, exportedAnimations, collisionMode, includeCollision ),
+				Utf8WithoutBom );
+			return true;
+		}
+		catch ( Exception ex )
+		{
+			context.Warn( $"Failed to build CAST model \"{targetAbsolutePath}\": {ex.Message}" );
+			return false;
+		}
+	}
+
+	static bool TryWriteDmxCastModel(
+		CastSourceData sourceData,
+		IReadOnlyList<CastAnimationData> animations,
+		string targetAbsolutePath,
+		CreateModelFromMeshDialog.CollisionMode collisionMode,
+		CastImportContext context,
+		IReadOnlyList<RigsetReferenceData> rigsets = null )
+	{
+		try
+		{
+			var targetDirectory = Path.GetDirectoryName( targetAbsolutePath );
+			if ( string.IsNullOrWhiteSpace( targetDirectory ) )
+			{
+				context.Warn( $"Failed to build CAST model \"{targetAbsolutePath}\": target directory is missing." );
+				return false;
+			}
+
+			if ( sourceData.Skeleton is null || sourceData.Skeleton.Bones.Length == 0 )
+			{
+				context.Warn( $"Failed to build CAST model \"{targetAbsolutePath}\": CAST animated import requires a skeleton." );
+				return false;
+			}
+
+			Directory.CreateDirectory( targetDirectory );
+
+			var targetName = Path.GetFileNameWithoutExtension( targetAbsolutePath );
+			var sidecarDirectory = Path.Combine( targetDirectory, $"{targetName}.castimport" );
+			if ( !TryPrepareCastSidecarDirectory( targetDirectory, sidecarDirectory, context ) )
+				return false;
+
+			var meshMaterialTokens = new string[sourceData.Meshes.Length];
+			var generatedMaterials = CreateGeneratedCastMaterials( sourceData.Meshes, meshMaterialTokens );
+
+			string placeholderMaterialToken = null;
+			var needsPlaceholderMesh = sourceData.Meshes.Length == 0;
+			if ( needsPlaceholderMesh )
+			{
+				placeholderMaterialToken = $"cast_material_{generatedMaterials.Count}.vmat";
+				generatedMaterials.Add( new CastGeneratedMaterial( placeholderMaterialToken, CastFallbackMaterial ) );
+				context.Warn( $"CAST model \"{context.SourcePath}\" did not contain any meshes; generating a tiny placeholder mesh so imported animations remain available." );
+
+				if ( collisionMode != CreateModelFromMeshDialog.CollisionMode.None )
+					context.Warn( $"Skipping collision generation for CAST model \"{context.SourcePath}\" because only a placeholder mesh could be generated." );
+			}
+
+			var baseDmxPath = Path.Combine( sidecarDirectory, $"{targetName}.dmx" );
+			File.WriteAllText( baseDmxPath, CreateBaseCastDmxText( sourceData, meshMaterialTokens, placeholderMaterialToken ), Utf8WithoutBom );
+
+			if ( !TryGetAssetRelativePath( baseDmxPath, context, out var baseDmxRelativePath ) )
+				return false;
+
+			var exportedAnimations = new List<CastGeneratedAnimationFile>();
+			if ( animations is not null )
+			{
+				for ( var i = 0; i < animations.Count; i++ )
+				{
+					var animation = animations[i];
+					if ( animation is null || animation.Frames.Length == 0 )
+						continue;
+
+					var animationFileName = $"{i:D3}_{SanitizeCastFileName( animation.Name )}.dmx";
+					var animationAbsolutePath = Path.Combine( sidecarDirectory, animationFileName );
+					File.WriteAllText( animationAbsolutePath, CreateAnimationCastDmxText( sourceData.Skeleton, animation ), Utf8WithoutBom );
+
+					if ( !TryGetAssetRelativePath( animationAbsolutePath, context, out var animationRelativePath ) )
+						return false;
+
+					exportedAnimations.Add( new CastGeneratedAnimationFile( animation, animationRelativePath ) );
+				}
+			}
+
+			if ( !TryAppendRigsetAnimations( sourceData.Skeleton, rigsets, exportedAnimations, context ) )
+				return false;
+
+			var includeCollision = collisionMode != CreateModelFromMeshDialog.CollisionMode.None && !needsPlaceholderMesh;
+			File.WriteAllText(
+				targetAbsolutePath,
+				CreateCastModelDocText( sourceData, baseDmxRelativePath, generatedMaterials, exportedAnimations, collisionMode, includeCollision ),
 				Utf8WithoutBom );
 			return true;
 		}
@@ -1424,7 +1511,7 @@ public static partial class EditorUtility
 		context.Warn( $"CAST advanced data in \"{sourceData.Name}\" cannot be preserved yet: {reason}" );
 
 		if ( animations is not null && animations.Any( x => x is not null && x.HasScaleKeys ) )
-			context.Warn( "CAST animation scale curves are parsed but will fall back to SMD until advanced DMX animation import is validated." );
+			context.Warn( "CAST animation scale curves are parsed but will be lost because this import is falling back to SMD." );
 
 		if ( animations is not null && animations.Any( x => x is not null && x.Events.Count > 0 ) )
 			context.Warn( "CAST notification events are parsed but will not be emitted until the ModelDoc event schema is fixture-confirmed." );
@@ -1508,6 +1595,631 @@ public static partial class EditorUtility
 
 		builder.AppendLine( "end" );
 		return builder.ToString();
+	}
+
+	static string CreateBaseCastDmxText( CastSourceData sourceData, IReadOnlyList<string> meshMaterialTokens, string placeholderMaterialToken )
+	{
+		var meshes = sourceData.Meshes.Length > 0
+			? sourceData.Meshes
+			: [CreatePlaceholderCastMeshData( placeholderMaterialToken ?? CastFallbackMaterial )];
+
+		var builder = new StringBuilder();
+		var documentId = CreateStableDmxId( sourceData.Name, "model-document" );
+		var modelId = CreateStableDmxId( sourceData.Name, "model" );
+		var meshIds = meshes.Select( x => CreateStableDmxId( sourceData.Name, "mesh", x.Name, x.SourceHash.ToString( CultureInfo.InvariantCulture ) ) ).ToArray();
+		var meshDagIds = meshes.Select( x => CreateStableDmxId( sourceData.Name, "mesh-dag", x.Name, x.SourceHash.ToString( CultureInfo.InvariantCulture ) ) ).ToArray();
+		var currentStateIds = meshes.Select( x => CreateStableDmxId( sourceData.Name, "mesh-bind", x.Name, x.SourceHash.ToString( CultureInfo.InvariantCulture ) ) ).ToArray();
+		var jointIds = CreateCastDmxJointIds( sourceData.Skeleton, sourceData.Name );
+
+		builder.AppendLine( "<!-- dmx encoding keyvalues2 4 format model 22 -->" );
+		builder.AppendLine( "\"DmElement\"" );
+		builder.AppendLine( "{" );
+		AppendDmxProperty( builder, 1, "id", "elementid", documentId );
+		AppendDmxProperty( builder, 1, "name", "string", "root" );
+		AppendDmxProperty( builder, 1, "model", "element", modelId );
+		AppendDmxProperty( builder, 1, "skeleton", "element", modelId );
+		builder.AppendLine( "}" );
+		builder.AppendLine();
+
+		AppendDmxModel( builder, sourceData.Name, modelId, sourceData.Skeleton, jointIds, meshDagIds );
+		AppendDmxJoints( builder, sourceData.Name, sourceData.Skeleton, jointIds );
+
+		for ( var i = 0; i < meshes.Length; i++ )
+		{
+			var materialToken = sourceData.Meshes.Length > 0 && meshMaterialTokens is not null && i < meshMaterialTokens.Count
+				? meshMaterialTokens[i]
+				: placeholderMaterialToken ?? CastFallbackMaterial;
+
+			AppendDmxMeshDag( builder, sourceData.Name, meshes[i], meshDagIds[i], meshIds[i] );
+			AppendDmxMesh( builder, meshes[i], meshIds[i], currentStateIds[i], materialToken );
+		}
+
+		return builder.ToString();
+	}
+
+	static string CreateAnimationCastDmxText( CastSkeletonData skeletonData, CastAnimationData animation )
+	{
+		var builder = new StringBuilder();
+		var animationName = animation?.Name ?? "animation";
+		var documentId = CreateStableDmxId( animationName, "animation-document" );
+		var modelId = CreateStableDmxId( animationName, "animation-model" );
+		var animationListId = CreateStableDmxId( animationName, "animation-list" );
+		var clipId = CreateStableDmxId( animationName, "clip" );
+		var jointIds = CreateCastDmxJointIds( skeletonData, animationName );
+
+		builder.AppendLine( "<!-- dmx encoding keyvalues2 4 format model 22 -->" );
+		builder.AppendLine( "\"DmElement\"" );
+		builder.AppendLine( "{" );
+		AppendDmxProperty( builder, 1, "id", "elementid", documentId );
+		AppendDmxProperty( builder, 1, "name", "string", "root" );
+		AppendDmxProperty( builder, 1, "gameModel", "element", modelId );
+		AppendDmxProperty( builder, 1, "skeleton", "element", modelId );
+		AppendDmxProperty( builder, 1, "animationList", "element", animationListId );
+		builder.AppendLine( "}" );
+		builder.AppendLine();
+
+		builder.AppendLine( "\"DmeAnimationList\"" );
+		builder.AppendLine( "{" );
+		AppendDmxProperty( builder, 1, "id", "elementid", animationListId );
+		AppendDmxProperty( builder, 1, "name", "string", animationName );
+		builder.AppendLine( "\t\"animations\" \"element_array\"" );
+		builder.AppendLine( "\t[" );
+		AppendDmxElementReference( builder, 2, clipId, false );
+		builder.AppendLine( "\t]" );
+		builder.AppendLine( "}" );
+		builder.AppendLine();
+
+		AppendDmxAnimationClip( builder, skeletonData, animation, clipId, jointIds );
+		AppendDmxModel( builder, animationName, modelId, skeletonData, jointIds, [] );
+		AppendDmxJoints( builder, animationName, skeletonData, jointIds );
+
+		return builder.ToString();
+	}
+
+	static CastMeshData CreatePlaceholderCastMeshData( string materialName )
+	{
+		return new CastMeshData
+		{
+			Name = "placeholder",
+			MaterialName = materialName,
+			Positions =
+			[
+				new Vector3( 0.0f, 0.0f, 0.0f ),
+				new Vector3( 0.01f, 0.0f, 0.0f ),
+				new Vector3( 0.0f, 0.01f, 0.0f )
+			],
+			Normals =
+			[
+				Vector3.Up,
+				Vector3.Up,
+				Vector3.Up
+			],
+			TexCoords =
+			[
+				new Vector2( 0.0f, 0.0f ),
+				new Vector2( 1.0f, 0.0f ),
+				new Vector2( 0.0f, 1.0f )
+			],
+			FaceVertexNormals =
+			[
+				Vector3.Up,
+				Vector3.Up,
+				Vector3.Up
+			],
+			FaceVertexTexCoords =
+			[
+				new Vector2( 0.0f, 0.0f ),
+				new Vector2( 1.0f, 0.0f ),
+				new Vector2( 0.0f, 1.0f )
+			],
+			Faces = [new CastTriangle( 0, 1, 2 )],
+			UsesSkinning = true,
+			BlendIndices =
+			[
+				new Color32( 0, 0, 0, 0 ),
+				new Color32( 0, 0, 0, 0 ),
+				new Color32( 0, 0, 0, 0 )
+			],
+			BlendWeights =
+			[
+				new Color32( 255, 0, 0, 0 ),
+				new Color32( 255, 0, 0, 0 ),
+				new Color32( 255, 0, 0, 0 )
+			]
+		};
+	}
+
+	static void AppendDmxModel( StringBuilder builder, string documentName, string modelId, CastSkeletonData skeletonData, IReadOnlyList<string> jointIds, IReadOnlyList<string> meshDagIds )
+	{
+		builder.AppendLine( "\"DmeModel\"" );
+		builder.AppendLine( "{" );
+		AppendDmxProperty( builder, 1, "id", "elementid", modelId );
+		AppendDmxProperty( builder, 1, "name", "string", documentName );
+		AppendDmxTransform( builder, 1, "unnamed", CreateStableDmxId( documentName, "model-transform" ), Transform.Zero );
+		AppendDmxProperty( builder, 1, "visible", "bool", "1" );
+
+		builder.AppendLine( "\t\"children\" \"element_array\"" );
+		builder.AppendLine( "\t[" );
+		var childIds = new List<string>();
+		for ( var i = 0; i < skeletonData.Bones.Length; i++ )
+		{
+			if ( skeletonData.Bones[i].ParentIndex < 0 )
+				childIds.Add( jointIds[i] );
+		}
+		childIds.AddRange( meshDagIds );
+		AppendDmxElementReferences( builder, 2, childIds );
+		builder.AppendLine( "\t]" );
+
+		builder.AppendLine( "\t\"jointList\" \"element_array\"" );
+		builder.AppendLine( "\t[" );
+		AppendDmxElementReferences( builder, 2, jointIds );
+		builder.AppendLine( "\t]" );
+
+		AppendDmxProperty( builder, 1, "upAxis", "string", "Z" );
+		builder.AppendLine( "\t\"axisSystem\" \"DmeAxisSystem\"" );
+		builder.AppendLine( "\t{" );
+		AppendDmxProperty( builder, 2, "id", "elementid", CreateStableDmxId( documentName, "axis-system" ) );
+		AppendDmxProperty( builder, 2, "name", "string", string.Empty );
+		AppendDmxProperty( builder, 2, "upAxis", "int", "3" );
+		AppendDmxProperty( builder, 2, "forwardParity", "int", "-2" );
+		AppendDmxProperty( builder, 2, "coordSys", "int", "0" );
+		builder.AppendLine( "\t}" );
+		builder.AppendLine( "}" );
+		builder.AppendLine();
+	}
+
+	static void AppendDmxJoints( StringBuilder builder, string documentName, CastSkeletonData skeletonData, IReadOnlyList<string> jointIds )
+	{
+		for ( var boneIndex = 0; boneIndex < skeletonData.Bones.Length; boneIndex++ )
+		{
+			var bone = skeletonData.Bones[boneIndex];
+			builder.AppendLine( "\"DmeJoint\"" );
+			builder.AppendLine( "{" );
+			AppendDmxProperty( builder, 1, "id", "elementid", jointIds[boneIndex] );
+			AppendDmxProperty( builder, 1, "name", "string", bone.Name );
+			AppendDmxTransform( builder, 1, bone.Name, CreateStableDmxId( documentName, "joint-transform", boneIndex.ToString( CultureInfo.InvariantCulture ), bone.Name ), bone.LocalTransform );
+			AppendDmxProperty( builder, 1, "visible", "bool", "1" );
+
+			var children = Enumerable.Range( 0, skeletonData.Bones.Length )
+				.Where( x => skeletonData.Bones[x].ParentIndex == boneIndex )
+				.Select( x => jointIds[x] )
+				.ToArray();
+
+			builder.AppendLine( "\t\"children\" \"element_array\"" );
+			builder.AppendLine( "\t[" );
+			AppendDmxElementReferences( builder, 2, children );
+			builder.AppendLine( "\t]" );
+			builder.AppendLine( "}" );
+			builder.AppendLine();
+		}
+	}
+
+	static void AppendDmxMeshDag( StringBuilder builder, string documentName, CastMeshData meshData, string dagId, string meshId )
+	{
+		builder.AppendLine( "\"DmeDag\"" );
+		builder.AppendLine( "{" );
+		AppendDmxProperty( builder, 1, "id", "elementid", dagId );
+		AppendDmxProperty( builder, 1, "name", "string", meshData.Name );
+		AppendDmxTransform( builder, 1, meshData.Name, CreateStableDmxId( documentName, "mesh-transform", meshData.Name, meshData.SourceHash.ToString( CultureInfo.InvariantCulture ) ), Transform.Zero );
+		AppendDmxProperty( builder, 1, "shape", "element", meshId );
+		AppendDmxProperty( builder, 1, "visible", "bool", "1" );
+		builder.AppendLine( "}" );
+		builder.AppendLine();
+	}
+
+	static void AppendDmxMesh( StringBuilder builder, CastMeshData meshData, string meshId, string currentStateId, string materialToken )
+	{
+		var faceSetId = CreateStableDmxId( meshData.Name, "face-set", meshData.SourceHash.ToString( CultureInfo.InvariantCulture ) );
+		builder.AppendLine( "\"DmeMesh\"" );
+		builder.AppendLine( "{" );
+		AppendDmxProperty( builder, 1, "id", "elementid", meshId );
+		AppendDmxProperty( builder, 1, "name", "string", meshData.Name );
+		AppendDmxProperty( builder, 1, "visible", "bool", "1" );
+		AppendDmxProperty( builder, 1, "currentState", "element", currentStateId );
+		builder.AppendLine( "\t\"baseStates\" \"element_array\"" );
+		builder.AppendLine( "\t[" );
+		AppendDmxElementReference( builder, 2, currentStateId, false );
+		builder.AppendLine( "\t]" );
+		builder.AppendLine( "\t\"deltaStates\" \"element_array\"" );
+		builder.AppendLine( "\t[" );
+		builder.AppendLine( "\t]" );
+		builder.AppendLine( "\t\"faceSets\" \"element_array\"" );
+		builder.AppendLine( "\t[" );
+		builder.AppendLine( "\t\t\"DmeFaceSet\"" );
+		builder.AppendLine( "\t\t{" );
+		AppendDmxProperty( builder, 3, "id", "elementid", faceSetId );
+		AppendDmxProperty( builder, 3, "name", "string", meshData.MaterialName );
+		AppendDmxIntArray( builder, 3, "faces", EnumerateDmxFaceIndices( meshData ) );
+		builder.AppendLine( "\t\t\t\"material\" \"DmeMaterial\"" );
+		builder.AppendLine( "\t\t\t{" );
+		AppendDmxProperty( builder, 4, "id", "elementid", CreateStableDmxId( meshData.Name, "material", materialToken ) );
+		AppendDmxProperty( builder, 4, "name", "string", materialToken );
+		AppendDmxProperty( builder, 4, "mtlName", "string", materialToken );
+		builder.AppendLine( "\t\t\t}" );
+		builder.AppendLine( "\t\t}" );
+		builder.AppendLine( "\t]" );
+		builder.AppendLine( "\t\"deltaStateWeights\" \"vector2_array\"" );
+		builder.AppendLine( "\t[" );
+		builder.AppendLine( "\t]" );
+		builder.AppendLine( "\t\"deltaStateWeightsLagged\" \"vector2_array\"" );
+		builder.AppendLine( "\t[" );
+		builder.AppendLine( "\t]" );
+		builder.AppendLine( "}" );
+		builder.AppendLine();
+
+		AppendDmxVertexData( builder, meshData, currentStateId );
+	}
+
+	static void AppendDmxVertexData( StringBuilder builder, CastMeshData meshData, string currentStateId )
+	{
+		var usesSkinning = meshData.UsesSkinning || meshData.BlendIndices.Length > 0 || meshData.BlendWeights.Length > 0;
+		var faceVertexCount = meshData.Faces.Length * 3;
+		var useFaceVertexNormals = meshData.FaceVertexNormals.Length == faceVertexCount;
+		var useFaceVertexTexCoords = meshData.FaceVertexTexCoords.Length == faceVertexCount;
+		var normalValues = useFaceVertexNormals ? meshData.FaceVertexNormals : meshData.Normals;
+		var texCoordValues = useFaceVertexTexCoords ? meshData.FaceVertexTexCoords : meshData.TexCoords;
+		var normalIndices = useFaceVertexNormals ? EnumerateDmxSequentialIndices( faceVertexCount ) : EnumerateDmxVertexIndices( meshData );
+		var texCoordIndices = useFaceVertexTexCoords ? EnumerateDmxSequentialIndices( faceVertexCount ) : EnumerateDmxVertexIndices( meshData );
+
+		builder.AppendLine( "\"DmeVertexData\"" );
+		builder.AppendLine( "{" );
+		AppendDmxProperty( builder, 1, "id", "elementid", currentStateId );
+		AppendDmxProperty( builder, 1, "name", "string", "bind" );
+		builder.AppendLine( "\t\"vertexFormat\" \"string_array\"" );
+		builder.AppendLine( "\t[" );
+		AppendDmxArrayValue( builder, 2, "position$0", true );
+		AppendDmxArrayValue( builder, 2, "normal$0", true );
+		AppendDmxArrayValue( builder, 2, "texcoord$0", usesSkinning );
+		if ( usesSkinning )
+		{
+			AppendDmxArrayValue( builder, 2, "blendweights$0", true );
+			AppendDmxArrayValue( builder, 2, "blendindices$0", false );
+		}
+		builder.AppendLine( "\t]" );
+		AppendDmxProperty( builder, 1, "jointCount", "int", usesSkinning ? "4" : "0" );
+		AppendDmxProperty( builder, 1, "flipVCoordinates", "bool", "1" );
+		AppendDmxVector3Array( builder, 1, "position$0", meshData.Positions );
+		AppendDmxIntArray( builder, 1, "position$0Indices", EnumerateDmxVertexIndices( meshData ) );
+		AppendDmxVector3Array( builder, 1, "normal$0", normalValues );
+		AppendDmxIntArray( builder, 1, "normal$0Indices", normalIndices );
+		AppendDmxVector2Array( builder, 1, "texcoord$0", texCoordValues );
+		AppendDmxIntArray( builder, 1, "texcoord$0Indices", texCoordIndices );
+
+		if ( usesSkinning )
+		{
+			AppendDmxFloatArray( builder, 1, "blendweights$0", EnumerateDmxBlendWeights( meshData ) );
+			AppendDmxIntArray( builder, 1, "blendindices$0", EnumerateDmxBlendIndices( meshData ) );
+		}
+
+		builder.AppendLine( "}" );
+		builder.AppendLine();
+	}
+
+	static void AppendDmxAnimationClip( StringBuilder builder, CastSkeletonData skeletonData, CastAnimationData animation, string clipId, IReadOnlyList<string> jointIds )
+	{
+		builder.AppendLine( "\"DmeChannelsClip\"" );
+		builder.AppendLine( "{" );
+		AppendDmxProperty( builder, 1, "id", "elementid", clipId );
+		AppendDmxProperty( builder, 1, "name", "string", animation.Name );
+		AppendDmxProperty( builder, 1, "frameRate", "float", FormatFloat( animation.FrameRate ) );
+		builder.AppendLine( "\t\"channels\" \"element_array\"" );
+		builder.AppendLine( "\t[" );
+		var channelCount = skeletonData.Bones.Length * (animation.HasScaleKeys ? 3 : 2);
+		var channelIndex = 0;
+		for ( var boneIndex = 0; boneIndex < skeletonData.Bones.Length; boneIndex++ )
+		{
+			var bone = skeletonData.Bones[boneIndex];
+			var transformId = CreateStableDmxId( animation.Name, "joint-transform", boneIndex.ToString( CultureInfo.InvariantCulture ), bone.Name );
+			AppendDmxTransformChannel( builder, 2, animation, boneIndex, bone.Name, transformId, "position", "valuePosition", "DmeVector3Log", "DmeVector3LogLayer", channelIndex++ < channelCount - 1, frame => frame.BoneTransforms[boneIndex].Position );
+			AppendDmxTransformChannel( builder, 2, animation, boneIndex, bone.Name, transformId, "orientation", "valueOrientation", "DmeQuaternionLog", "DmeQuaternionLogLayer", channelIndex++ < channelCount - 1, frame => frame.BoneTransforms[boneIndex].Rotation );
+
+			if ( animation.HasScaleKeys )
+				AppendDmxTransformChannel( builder, 2, animation, boneIndex, bone.Name, transformId, "scale", "valueScale", "DmeVector3Log", "DmeVector3LogLayer", channelIndex++ < channelCount - 1, frame => frame.BoneTransforms[boneIndex].Scale );
+		}
+		builder.AppendLine( "\t]" );
+		builder.AppendLine( "\t\"timeFrame\" \"DmeTimeFrame\"" );
+		builder.AppendLine( "\t{" );
+		AppendDmxProperty( builder, 2, "id", "elementid", CreateStableDmxId( animation.Name, "time-frame" ) );
+		AppendDmxProperty( builder, 2, "name", "string", "timeFrame" );
+		AppendDmxProperty( builder, 2, "start", "time", "0" );
+		AppendDmxProperty( builder, 2, "duration", "time", FormatFloat( GetCastAnimationDuration( animation ) ) );
+		AppendDmxProperty( builder, 2, "offset", "time", "0" );
+		AppendDmxProperty( builder, 2, "scale", "float", "1.00000" );
+		builder.AppendLine( "\t}" );
+		builder.AppendLine( "}" );
+		builder.AppendLine();
+	}
+
+	static void AppendDmxTransformChannel<TValue>(
+		StringBuilder builder,
+		int indent,
+		CastAnimationData animation,
+		int boneIndex,
+		string boneName,
+		string transformId,
+		string toAttribute,
+		string fromAttribute,
+		string logClassName,
+		string layerClassName,
+		bool trailingComma,
+		Func<CastAnimationFrameData, TValue> getValue )
+	{
+		var channelName = $"{boneName}_{toAttribute}";
+		AppendDmxIndent( builder, indent );
+		builder.AppendLine( "\"DmeChannel\"" );
+		AppendDmxIndent( builder, indent );
+		builder.AppendLine( "{" );
+		AppendDmxProperty( builder, indent + 1, "id", "elementid", CreateStableDmxId( animation.Name, "channel", boneIndex.ToString( CultureInfo.InvariantCulture ), toAttribute ) );
+		AppendDmxProperty( builder, indent + 1, "name", "string", channelName );
+		AppendDmxProperty( builder, indent + 1, "fromElement", "element", CreateStableDmxId( animation.Name, "log", boneIndex.ToString( CultureInfo.InvariantCulture ), toAttribute ) );
+		AppendDmxProperty( builder, indent + 1, "fromAttribute", "string", fromAttribute );
+		AppendDmxProperty( builder, indent + 1, "fromIndex", "int", "-1" );
+		AppendDmxProperty( builder, indent + 1, "toElement", "element", transformId );
+		AppendDmxProperty( builder, indent + 1, "toAttribute", "string", toAttribute );
+		AppendDmxProperty( builder, indent + 1, "toIndex", "int", "-1" );
+		AppendDmxProperty( builder, indent + 1, "mode", "int", "0" );
+		AppendDmxProperty( builder, indent + 1, "mute", "bool", "0" );
+		AppendDmxIndent( builder, indent + 1 );
+		builder.AppendLine( $"\"log\" \"{logClassName}\"" );
+		AppendDmxIndent( builder, indent + 1 );
+		builder.AppendLine( "{" );
+		AppendDmxProperty( builder, indent + 2, "id", "elementid", CreateStableDmxId( animation.Name, "log", boneIndex.ToString( CultureInfo.InvariantCulture ), toAttribute ) );
+		AppendDmxProperty( builder, indent + 2, "name", "string", $"{toAttribute} log" );
+		AppendDmxIndent( builder, indent + 2 );
+		builder.AppendLine( "\"layers\" \"element_array\"" );
+		AppendDmxIndent( builder, indent + 2 );
+		builder.AppendLine( "[" );
+		AppendDmxIndent( builder, indent + 3 );
+		builder.AppendLine( $"\"{layerClassName}\"" );
+		AppendDmxIndent( builder, indent + 3 );
+		builder.AppendLine( "{" );
+		AppendDmxProperty( builder, indent + 4, "id", "elementid", CreateStableDmxId( animation.Name, "log-layer", boneIndex.ToString( CultureInfo.InvariantCulture ), toAttribute ) );
+		AppendDmxProperty( builder, indent + 4, "name", "string", "Layer 0" );
+		AppendDmxTimeArray( builder, indent + 4, "times", animation );
+		AppendDmxLogValueArray( builder, indent + 4, "values", animation, getValue );
+		AppendDmxIntArray( builder, indent + 4, "curvetypes", Enumerable.Repeat( 5, animation.Frames.Length ) );
+		AppendDmxIndent( builder, indent + 3 );
+		builder.AppendLine( "}" );
+		AppendDmxIndent( builder, indent + 2 );
+		builder.AppendLine( "]" );
+		AppendDmxIndent( builder, indent + 1 );
+		builder.AppendLine( "}" );
+		AppendDmxIndent( builder, indent );
+		builder.AppendLine( trailingComma ? "}," : "}" );
+	}
+
+	static string[] CreateCastDmxJointIds( CastSkeletonData skeletonData, string documentName )
+	{
+		var jointIds = new string[skeletonData.Bones.Length];
+		for ( var i = 0; i < skeletonData.Bones.Length; i++ )
+			jointIds[i] = CreateStableDmxId( documentName, "joint", i.ToString( CultureInfo.InvariantCulture ), skeletonData.Bones[i].Name );
+
+		return jointIds;
+	}
+
+	static float GetCastAnimationDuration( CastAnimationData animation )
+	{
+		if ( animation is null || animation.Frames.Length <= 1 || animation.FrameRate <= 0.0f )
+			return 0.0f;
+
+		return (animation.Frames.Length - 1) / animation.FrameRate;
+	}
+
+	static IEnumerable<int> EnumerateDmxFaceIndices( CastMeshData meshData )
+	{
+		foreach ( var face in meshData.Faces )
+		{
+			yield return face.A;
+			yield return face.B;
+			yield return face.C;
+			yield return -1;
+		}
+	}
+
+	static IEnumerable<int> EnumerateDmxVertexIndices( CastMeshData meshData )
+	{
+		foreach ( var face in meshData.Faces )
+		{
+			yield return face.A;
+			yield return face.B;
+			yield return face.C;
+		}
+	}
+
+	static IEnumerable<int> EnumerateDmxSequentialIndices( int count )
+	{
+		for ( var i = 0; i < count; i++ )
+			yield return i;
+	}
+
+	static IEnumerable<float> EnumerateDmxBlendWeights( CastMeshData meshData )
+	{
+		for ( var vertexIndex = 0; vertexIndex < meshData.Positions.Length; vertexIndex++ )
+		{
+			var weights = vertexIndex < meshData.BlendWeights.Length
+				? meshData.BlendWeights[vertexIndex]
+				: new Color32( 255, 0, 0, 0 );
+
+			yield return weights.r / 255.0f;
+			yield return weights.g / 255.0f;
+			yield return weights.b / 255.0f;
+			yield return weights.a / 255.0f;
+		}
+	}
+
+	static IEnumerable<int> EnumerateDmxBlendIndices( CastMeshData meshData )
+	{
+		for ( var vertexIndex = 0; vertexIndex < meshData.Positions.Length; vertexIndex++ )
+		{
+			var indices = vertexIndex < meshData.BlendIndices.Length
+				? meshData.BlendIndices[vertexIndex]
+				: new Color32( 0, 0, 0, 0 );
+
+			yield return indices.r;
+			yield return indices.g;
+			yield return indices.b;
+			yield return indices.a;
+		}
+	}
+
+	static string CreateStableDmxId( params string[] parts )
+	{
+		var seed = string.Join( "\u001f", parts ?? [] );
+		using var md5 = MD5.Create();
+		var bytes = md5.ComputeHash( Encoding.UTF8.GetBytes( seed ) );
+		return new Guid( bytes ).ToString( "D" );
+	}
+
+	static void AppendDmxProperty( StringBuilder builder, int indent, string name, string type, string value )
+	{
+		AppendDmxIndent( builder, indent );
+		builder
+			.Append( '"' )
+			.Append( EscapeDmxString( name ) )
+			.Append( "\" \"" )
+			.Append( EscapeDmxString( type ) )
+			.Append( "\" \"" )
+			.Append( EscapeDmxString( value ) )
+			.AppendLine( "\"" );
+	}
+
+	static void AppendDmxTransform( StringBuilder builder, int indent, string name, string id, Transform transform )
+	{
+		AppendDmxIndent( builder, indent );
+		builder.AppendLine( "\"transform\" \"DmeTransform\"" );
+		AppendDmxIndent( builder, indent );
+		builder.AppendLine( "{" );
+		AppendDmxProperty( builder, indent + 1, "id", "elementid", id );
+		AppendDmxProperty( builder, indent + 1, "name", "string", name );
+		AppendDmxProperty( builder, indent + 1, "position", "vector3", FormatDmxVector3( transform.Position ) );
+		AppendDmxProperty( builder, indent + 1, "orientation", "quaternion", FormatDmxQuaternion( transform.Rotation ) );
+		AppendDmxProperty( builder, indent + 1, "scale", "float", FormatFloat( transform.UniformScale ) );
+		AppendDmxIndent( builder, indent );
+		builder.AppendLine( "}" );
+	}
+
+	static void AppendDmxElementReferences( StringBuilder builder, int indent, IEnumerable<string> elementIds )
+	{
+		var ids = elementIds?.Where( x => !string.IsNullOrWhiteSpace( x ) ).ToArray() ?? [];
+		for ( var i = 0; i < ids.Length; i++ )
+			AppendDmxElementReference( builder, indent, ids[i], i < ids.Length - 1 );
+	}
+
+	static void AppendDmxElementReference( StringBuilder builder, int indent, string elementId, bool trailingComma )
+	{
+		AppendDmxIndent( builder, indent );
+		builder
+			.Append( "\"element\" \"" )
+			.Append( EscapeDmxString( elementId ) )
+			.Append( trailingComma ? "\"," : "\"" )
+			.AppendLine();
+	}
+
+	static void AppendDmxVector3Array( StringBuilder builder, int indent, string name, IEnumerable<Vector3> values )
+	{
+		AppendDmxArray( builder, indent, name, "vector3_array", values?.Select( FormatDmxVector3 ) ?? [] );
+	}
+
+	static void AppendDmxVector2Array( StringBuilder builder, int indent, string name, IEnumerable<Vector2> values )
+	{
+		AppendDmxArray( builder, indent, name, "vector2_array", values?.Select( FormatDmxVector2 ) ?? [] );
+	}
+
+	static void AppendDmxFloatArray( StringBuilder builder, int indent, string name, IEnumerable<float> values )
+	{
+		AppendDmxArray( builder, indent, name, "float_array", values?.Select( FormatFloat ) ?? [] );
+	}
+
+	static void AppendDmxIntArray( StringBuilder builder, int indent, string name, IEnumerable<int> values )
+	{
+		AppendDmxArray( builder, indent, name, "int_array", values?.Select( x => x.ToString( CultureInfo.InvariantCulture ) ) ?? [] );
+	}
+
+	static void AppendDmxTimeArray( StringBuilder builder, int indent, string name, CastAnimationData animation )
+	{
+		var frameRate = animation.FrameRate <= 0.0f ? 30.0f : animation.FrameRate;
+		AppendDmxArray(
+			builder,
+			indent,
+			name,
+			"time_array",
+			Enumerable.Range( 0, animation.Frames.Length ).Select( x => FormatFloat( x / frameRate ) ) );
+	}
+
+	static void AppendDmxLogValueArray<TValue>( StringBuilder builder, int indent, string name, CastAnimationData animation, Func<CastAnimationFrameData, TValue> getValue )
+	{
+		var values = animation.Frames.Select( frame => FormatDmxLogValue( getValue( frame ) ) );
+		var type = typeof( TValue ) == typeof( Rotation )
+			? "quaternion_array"
+			: "vector3_array";
+
+		AppendDmxArray( builder, indent, name, type, values );
+	}
+
+	static void AppendDmxArray( StringBuilder builder, int indent, string name, string type, IEnumerable<string> values )
+	{
+		AppendDmxIndent( builder, indent );
+		builder
+			.Append( '"' )
+			.Append( EscapeDmxString( name ) )
+			.Append( "\" \"" )
+			.Append( EscapeDmxString( type ) )
+			.AppendLine( "\"" );
+		AppendDmxIndent( builder, indent );
+		builder.AppendLine( "[" );
+
+		var arrayValues = values?.ToArray() ?? [];
+		for ( var i = 0; i < arrayValues.Length; i++ )
+			AppendDmxArrayValue( builder, indent + 1, arrayValues[i], i < arrayValues.Length - 1 );
+
+		AppendDmxIndent( builder, indent );
+		builder.AppendLine( "]" );
+	}
+
+	static void AppendDmxArrayValue( StringBuilder builder, int indent, string value, bool trailingComma )
+	{
+		AppendDmxIndent( builder, indent );
+		builder
+			.Append( '"' )
+			.Append( EscapeDmxString( value ) )
+			.Append( trailingComma ? "\"," : "\"" )
+			.AppendLine();
+	}
+
+	static void AppendDmxIndent( StringBuilder builder, int indent )
+	{
+		for ( var i = 0; i < indent; i++ )
+			builder.Append( '\t' );
+	}
+
+	static string FormatDmxLogValue<TValue>( TValue value )
+	{
+		return value switch
+		{
+			Vector3 vector => FormatDmxVector3( vector ),
+			Rotation rotation => FormatDmxQuaternion( rotation ),
+			_ => string.Empty
+		};
+	}
+
+	static string FormatDmxVector2( Vector2 value )
+	{
+		return $"{FormatFloat( value.x )} {FormatFloat( value.y )}";
+	}
+
+	static string FormatDmxVector3( Vector3 value )
+	{
+		return $"{FormatFloat( value.x )} {FormatFloat( value.y )} {FormatFloat( value.z )}";
+	}
+
+	static string FormatDmxQuaternion( Rotation value )
+	{
+		return $"{FormatFloat( value.x )} {FormatFloat( value.y )} {FormatFloat( value.z )} {FormatFloat( value.w )}";
+	}
+
+	static string EscapeDmxString( string value )
+	{
+		return (value ?? string.Empty).Replace( "\\", "\\\\" ).Replace( "\"", "\\\"" );
 	}
 
 	static string CreateCastModelDocText(
@@ -1653,7 +2365,7 @@ public static partial class EditorUtility
 		builder.AppendLine( $"{indent}\tanim_markup_ordered = false" );
 		builder.AppendLine( $"{indent}\tdisable_compression = false" );
 		builder.AppendLine( $"{indent}\tdisable_interpolation = false" );
-		builder.AppendLine( $"{indent}\tenable_scale = false" );
+		builder.AppendLine( $"{indent}\tenable_scale = {FormatBool( ShouldEnableScaleForAnimationFile( animation ) )}" );
 		builder.AppendLine( $"{indent}\tsource_filename = \"{EscapeKv3String( animation.RelativePath )}\"" );
 		builder.AppendLine( $"{indent}\tstart_frame = -1" );
 		builder.AppendLine( $"{indent}\tend_frame = -1" );
@@ -1661,6 +2373,12 @@ public static partial class EditorUtility
 		builder.AppendLine( $"{indent}\ttake = 0" );
 		builder.AppendLine( $"{indent}\treverse = false" );
 		builder.AppendLine( $"{indent}}}," );
+	}
+
+	static bool ShouldEnableScaleForAnimationFile( CastGeneratedAnimationFile animation )
+	{
+		return animation.Animation?.HasScaleKeys == true &&
+			string.Equals( Path.GetExtension( animation.RelativePath ), ".dmx", StringComparison.OrdinalIgnoreCase );
 	}
 
 	internal static string CreateCastModelDocTextForTests( CastSourceData sourceData, IReadOnlyList<CastAnimationData> animations )
@@ -1679,9 +2397,37 @@ public static partial class EditorUtility
 			includeCollision: false );
 	}
 
+	internal static string CreateCastDmxModelDocTextForTests( CastSourceData sourceData, IReadOnlyList<CastAnimationData> animations )
+	{
+		var generatedAnimations = animations?
+			.Where( x => x is not null )
+			.Select( x => new CastGeneratedAnimationFile( x, $"{SanitizeCastFileName( x.Name )}.dmx" ) )
+			.ToArray() ?? [];
+
+		return CreateCastModelDocText(
+			sourceData,
+			"model.dmx",
+			[],
+			generatedAnimations,
+			CreateModelFromMeshDialog.CollisionMode.None,
+			includeCollision: false );
+	}
+
+	internal static string CreateBaseCastDmxTextForTests( CastSourceData sourceData )
+	{
+		var meshMaterialTokens = new string[sourceData.Meshes.Length];
+		CreateGeneratedCastMaterials( sourceData.Meshes, meshMaterialTokens );
+		return CreateBaseCastDmxText( sourceData, meshMaterialTokens, null );
+	}
+
 	internal static string CreateAnimationCastSmdTextForTests( CastSkeletonData skeletonData, CastAnimationData animation )
 	{
 		return CreateAnimationCastSmdText( skeletonData, animation );
+	}
+
+	internal static string CreateAnimationCastDmxTextForTests( CastSkeletonData skeletonData, CastAnimationData animation )
+	{
+		return CreateAnimationCastDmxText( skeletonData, animation );
 	}
 
 	static void AppendSmdNodesSection( StringBuilder builder, CastSkeletonData skeletonData )
@@ -2002,8 +2748,38 @@ public static partial class EditorUtility
 
 		public bool CanWriteAdvancedData( CastSourceData sourceData, IReadOnlyList<CastAnimationData> animations, CastAnimatedModelImportOptions options, out string reason )
 		{
-			reason = "the DMX writer is gated until generated DMX and ModelDoc schema fixtures compile and preserve the requested data.";
-			return false;
+			if ( sourceData.BlendShapes.Length > 0 )
+			{
+				reason = "blend shape deltaState output has not been fixture-validated for generated CAST DMX.";
+				return false;
+			}
+
+			if ( sourceData.IkHandles.Length > 0 )
+			{
+				reason = "ModelDoc IK output has not been fixture-validated for generated CAST DMX.";
+				return false;
+			}
+
+			if ( sourceData.Constraints.Length > 0 )
+			{
+				reason = "ModelDoc constraint output has not been fixture-validated for generated CAST DMX.";
+				return false;
+			}
+
+			if ( animations is not null && animations.Any( x => x is not null && x.Events.Count > 0 ) )
+			{
+				reason = "ModelDoc notification event output has not been fixture-validated for generated CAST DMX.";
+				return false;
+			}
+
+			if ( animations is not null && animations.Any( x => x is not null && x.RootMotion is not null ) )
+			{
+				reason = "ModelDoc root motion output has not been fixture-validated for generated CAST DMX.";
+				return false;
+			}
+
+			reason = string.Empty;
+			return true;
 		}
 
 		public bool TryWrite(
@@ -2014,9 +2790,7 @@ public static partial class EditorUtility
 			CastImportContext context,
 			IReadOnlyList<RigsetReferenceData> rigsets )
 		{
-			CanWriteAdvancedData( sourceData, animations, CastAnimatedModelImportOptions.BasicOnly, out var reason );
-			context.Warn( $"Skipping DMX CAST export: {reason}" );
-			return false;
+			return TryWriteDmxCastModel( sourceData, animations, targetAbsolutePath, collisionMode, context, rigsets );
 		}
 	}
 
